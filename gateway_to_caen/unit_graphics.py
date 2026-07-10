@@ -18,7 +18,7 @@ class UnitGraphicsMixin:
         return result
 
     def _draw_unit(self, c: tk.Canvas, unit, w: float, h: float, cw: float, ch: float) -> None:
-        x, y = self._mx(unit.x, w, cw), (unit.y + .5) * ch
+        x, y = self._mx(unit.x, w, cw), self._my(unit.y, h, ch)
         radius = max(9, min(cw, ch) * .36)
         selected = unit.uid in self.selected
         heading = math.pi - unit.heading if self.sim.player_side == "Axis" else unit.heading
@@ -95,15 +95,15 @@ class UnitGraphicsMixin:
             muzzle_y = y + math.sin(heading) * radius * 1.18
             c.create_polygon(muzzle_x - 4, muzzle_y, muzzle_x, muzzle_y - 5, muzzle_x + 7, muzzle_y, muzzle_x, muzzle_y + 5, fill="#fff200", outline="#ff7b00", tags="frame")
         if selected and unit.target_x is not None and unit.target_y is not None:
-            tx, ty = self._mx(unit.target_x, w, cw), (unit.target_y + .5) * ch
+            tx, ty = self._mx(unit.target_x, w, cw), self._my(unit.target_y, h, ch)
             c.create_line(x, y, tx, ty, fill="#ffff55", dash=(5, 4), arrow="last", width=2, tags="frame")
 
     def _draw_effects(self, c: tk.Canvas, w: float, cw: float, ch: float) -> None:
         for effect in self.sim.effects:
             if not self.sim.is_position_visible(effect.x1, effect.y1, self.sim.player_side) and not self.sim.is_position_visible(effect.x2, effect.y2, self.sim.player_side):
                 continue
-            x1, y1 = self._mx(effect.x1, w, cw), (effect.y1 + .5) * ch
-            x2, y2 = self._mx(effect.x2, w, cw), (effect.y2 + .5) * ch
+            x1, y1 = self._mx(effect.x1, w, cw), self._my(effect.y1, self.canvas.winfo_height(), ch)
+            x2, y2 = self._mx(effect.x2, w, cw), self._my(effect.y2, self.canvas.winfo_height(), ch)
             progress = effect.progress
             if effect.kind == "tracer":
                 end_x = x1 + (x2 - x1) * progress
