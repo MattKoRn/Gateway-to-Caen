@@ -1,0 +1,172 @@
+            target = self._select_target(attacker, profile)
+            if target is None:
+                continue
+            dist = distance((attacker.x, attacker.y), (target.x, target.y))
+            attacker.fire_cooldown = profile['cooldown'] * self.rng.uniform(0.82, 1.18)
+            attacker.ammo = max(0.0, attacker.ammo - profile['ammo'])
+            attacker.last_fire = self.elapsed
+            effect_kind = 'shell' if attacker.unit_type == 'Mortar' else 'tracer'
+            self.effects.append(CombatEffect(effect_kind, attacker.x, attacker.y, target.x, target.y, 0.42 if effect_kind == 'shell' else 0.16, 0.42 if effect_kind == 'shell' else 0.16, attacker.side))
+            cover = TERRAIN_COVER[self.tile_at(target.x, target.y)]
+            stance_bonus = 1.18 if attacker.order == 'Assault' else 1.0
+            morale_factor = clamp(attacker.morale / 70.0, 0.45, 1.15)
+            suppression_factor = clamp(1.0 - attacker.suppression / 125.0, 0.18, 1.0)
+            range_factor = clamp(1.12 - dist / max(profile['range'], 0.1), 0.28, 1.0)
+            experience_factor = 0.78 + attacker.experience * 0.55
+            armour_factor = 0.34 if target.unit_type == 'Armour' and attacker.unit_type not in ('Armour', 'Mortar') else 1.0
+            hit_chance = profile['accuracy'] * stance_bonus * morale_factor * suppression_factor * range_factor * experience_factor * (1.0 - cover) * armour_factor
+            target.suppression = clamp(target.suppression + profile['suppression'] * (0.78 + self.rng.random() * 0.44), 0.0, 100.0)
+            if self.rng.random() >= hit_chance:
+                if attacker.unit_type == 'Mortar' and self.rng.random() < 0.45:
+                    self.effects.append(CombatEffect('impact', target.x + self.rng.uniform(-0.7, 0.7), target.y + self.rng.uniform(-0.7, 0.7), target.x, target.y, 0.55, 0.55, attacker.side))
+                continue
+            losses = 1
+            if attacker.unit_type in ('Mortar', 'Armour') and target.unit_type != 'Armour' and (self.rng.random() < 0.34):
+                losses += 1
+            losses = min(losses, target.men)
+            target.men = max(0, target.men - losses)
+            target.last_hit = self.elapsed
+            attacker.kills += losses
+            target.morale = clamp(target.morale - 6.5 * losses - target.suppression * 0.035, 0.0, 100.0)
+            self.effects.append(CombatEffect('impact', target.x, target.y, target.x, target.y, 0.7, 0.7, attacker.side))
+            self.log('Combat', f"{attacker.name} hit {target.name}; {losses} casualty{('ies' if losses != 1 else '')}.")
+            if target.men <= 0:
+                target.alive = False
+                target.order = 'Destroyed'
+                target.velocity_x = target.velocity_y = 0.0
+                self.effects.append(CombatEffect('destroyed', target.x, target.y, target.x, target.y, 1.45, 1.45, attacker.side))
+                if target.unit_type == 'Armour':
+                    self.obstacles.append(Obstacle(uid=f'wreck-{target.uid}', kind='burning_wreck', x=target.x, y=target.y, radius=0.36, length=0.66, angle=target.heading, blocks_movement=True, blocks_los=True))
+                self.log('Combat', f'{target.name} has been eliminated.')
+        if len(self.effects) > 90:
+            self.effects = self.effects[-90:]
+
+    def _update_effects(self, dt: float) -> None:
+        for effect in self.effects:
+            effect.ttl -= dt
+        self.effects = [effect for effect in self.effects if effect.ttl > 0.0]
+
+    def _recover_units(self, dt: float) -> None:
+        for unit in self.living_units():
+            recovery = 2.2 if unit.order == 'Hold' else 0.8
+            if self.tile_at(unit.x, unit.y) in ('woods', 'hedge', 'village'):
+                recovery *= 1.2
+            unit.suppression = max(0.0, unit.suppression - recovery * dt)
+            if unit.suppression < 25:
+                unit.morale = min(100.0, unit.morale + 0.22 * dt)
+            if unit.morale < 14 and unit.order != 'Retreat':
+                unit.order, unit.stance = ('Retreat', 'Broken')
+                unit.target_x = 1.0 if unit.side == 'Allied' else MAP_WIDTH - 2.0
+                unit.target_y = unit.y
+
+    def _update_control_points(self, dt: float) -> None:
+        for point in self.control_points:
+            allied = sum((1 for unit in self.living_units('Allied') if distance((unit.x, unit.y), (point.x, point.y)) <= 1.8))
+            axis = sum((1 for unit in self.living_units('Axis') if distance((unit.x, unit.y), (point.x, point.y)) <= 1.8))
+            old_owner = point.owner
+            if allied > axis:
+                point.capture = clamp(point.capture + dt * (allied - axis) * 12.0, -100.0, 100.0)
+            elif axis > allied:
+                point.capture = clamp(point.capture - dt * (axis - allied) * 12.0, -100.0, 100.0)
+            else:
+                point.capture *= max(0.0, 1.0 - dt * 0.08)
+            if point.capture >= 100.0:
+                point.owner = 'Allied'
+            elif point.capture <= -100.0:
+                point.owner = 'Axis'
+            elif abs(point.capture) < 5.0 and allied == 0 and (axis == 0):
+                point.owner = 'Neutral'
+            if old_owner != point.owner:
+                self.log('Objectives', f'{point.name} captured by {point.owner} forces.')
+
+    def _check_victory(self) -> None:
+        allied = self.living_units('Allied')
+        axis = self.living_units('Axis')
+        winner: str | None = None
+        if not allied:
+            winner = 'Axis'
+        elif not axis:
+            winner = 'Allied'
+        elif self.elapsed >= 20 * 60:
+            winner = 'Allied' if self.battle_score('Allied') >= self.battle_score('Axis') else 'Axis'
+        if winner:
+            self._conclude_battle(winner, 'Battle concluded')
+
+    def _conclude_battle(self, winner: str, reason: str) -> None:
+        if self.battle_over:
+            return
+        self.battle_over = True
+        self.winner = winner
+        self.post_battle_elapsed = 0.0
+        self.log('Command', f'{reason}. {winner} victory. A new map will begin in 10 seconds.')
+        self.brain.mark_result(winner == self.enemy_side)
+        self._finalize_experiences(winner)
+
+    def _finalize_experiences(self, winner: str) -> None:
+        for uid, previous in list(self.experiences.items()):
+            unit = self.unit_by_id(uid)
+            if not unit:
+                continue
+            terminal_reward = 1.5 if unit.side == winner else -1.5
+            next_state = self.state_vector(unit) if unit.alive else [-1.0] * self.brain.input_size
+            self.last_training_error = self.brain.train(previous.state, previous.action, terminal_reward, next_state, terminal=True)
+        self.experiences.clear()
+
+    def force_result(self, winner: str) -> None:
+        if winner in ('Allied', 'Axis'):
+            self._conclude_battle(winner, 'Battle ended by command decision')
+
+    def battle_score(self, side: str) -> int:
+        unit_score = sum((unit.men * 8 + int(unit.morale) for unit in self.living_units(side)))
+        objective_score = sum((point.value for point in self.control_points if point.owner == side))
+        return unit_score + objective_score
+
+    def to_dict(self) -> dict[str, Any]:
+        explored_payload = {side: [[x, y] for x, y in sorted(tiles)] for side, tiles in self.explored_tiles.items()}
+        return {'version': self.SAVE_VERSION, 'seed': self.seed, 'terrain': self.terrain, 'units': [unit.to_dict() for unit in self.units], 'control_points': [point.to_dict() for point in self.control_points], 'obstacles': [obstacle.to_dict() for obstacle in self.obstacles], 'events': [event.to_dict() for event in self.events[-250:]], 'elapsed': self.elapsed, 'battle_over': self.battle_over, 'winner': self.winner, 'post_battle_elapsed': self.post_battle_elapsed, 'operation_name': self.operation_name, 'weather': self.weather, 'date_label': self.date_label, 'player_side': self.player_side, 'player_ai_enabled': self.player_ai_enabled, 'allied_ai_enabled': self.allied_ai_enabled, 'explored_tiles': explored_payload}
+
+    def load_dict(self, data: dict[str, Any]) -> None:
+        terrain = data.get('terrain')
+        units = data.get('units')
+        points = data.get('control_points')
+        if not isinstance(terrain, list) or not isinstance(units, list) or (not isinstance(points, list)):
+            raise ValueError('Invalid save data')
+        if len(terrain) != MAP_HEIGHT or any((not isinstance(row, list) or len(row) != MAP_WIDTH for row in terrain)):
+            raise ValueError('Invalid terrain dimensions')
+        self.seed = int(data.get('seed', self.seed))
+        self.rng.seed(self.seed)
+        side = str(data.get('player_side', 'Allied'))
+        self.player_side = side if side in ('Allied', 'Axis') else 'Allied'
+        self.player_ai_enabled = bool(data.get('player_ai_enabled', data.get('allied_ai_enabled', False) if self.player_side == 'Allied' else False))
+        self.terrain = [[str(cell) if str(cell) in TERRAIN else 'open' for cell in row] for row in terrain]
+        self.units = [Unit.from_dict(item) for item in units if isinstance(item, dict)]
+        for unit in self.units:
+            unit.ai_controlled = unit.side != self.player_side
+        self.control_points = [ControlPoint(**item) for item in points if isinstance(item, dict)]
+        obstacle_data = data.get('obstacles')
+        self.obstacles = [Obstacle.from_dict(item) for item in obstacle_data if isinstance(item, dict)] if isinstance(obstacle_data, list) else self._generate_obstacles()
+        self.events = [Event(**item) for item in data.get('events', []) if isinstance(item, dict)]
+        self.effects = []
+        self.elapsed = float(data.get('elapsed', 0.0))
+        self.battle_over = bool(data.get('battle_over', False))
+        self.winner = data.get('winner')
+        self.post_battle_elapsed = clamp(float(data.get('post_battle_elapsed', 0.0)), 0.0, self.NEXT_MAP_DELAY)
+        self.operation_name = str(data.get('operation_name', 'Operation Iron Meadow'))
+        self.weather = str(data.get('weather', 'Overcast'))
+        self.date_label = str(data.get('date_label', 'July 1944'))
+        self.ai_accumulator = 0.0
+        self.visibility_accumulator = 0.0
+        self.experiences = {}
+        explored_data = data.get('explored_tiles', {})
+        self.explored_tiles = {'Allied': set(), 'Axis': set()}
+        if isinstance(explored_data, dict):
+            for side_name in ('Allied', 'Axis'):
+                values = explored_data.get(side_name, [])
+                if isinstance(values, list):
+                    for item in values:
+                        if isinstance(item, list) and len(item) == 2:
+                            x, y = (int(item[0]), int(item[1]))
+                            if 0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT:
+                                self.explored_tiles[side_name].add((x, y))
+        self._visible_cache = {'Allied': set(), 'Axis': set()}
+        self._recalculate_visibility(force=True)
