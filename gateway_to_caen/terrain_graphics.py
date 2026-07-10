@@ -144,7 +144,7 @@ class TerrainGraphicsMixin:
         for point in self.sim.control_points:
             if (point.x, point.y) not in explored:
                 continue
-            px, py = self._mx(point.x, w, cw), (point.y + .5) * ch
+            px, py = self._mx(point.x, w, cw), self._my(point.y, self.canvas.winfo_height(), ch)
             known = (point.x, point.y) in visible
             owner = point.owner if known else "Neutral"
             color = W95[owner.lower()] if owner in ("Allied", "Axis") else W95["neutral"]
