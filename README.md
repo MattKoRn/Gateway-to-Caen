@@ -1,6 +1,6 @@
 # Gateway to Caen: Tactical Command
 
-A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command interface, procedural battlefields, side-aware fog of war, persistent game saves, and a neural commander that learns across maps and sessions.
+A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command interface, procedural battlefields, side-aware fog of war, persistent game saves, offline campaign progress, and a neural commander that learns across maps and sessions.
 
 > This is an original clean-room project inspired by the broad tactical-command genre. It does not contain proprietary Close Combat code, artwork, maps, audio, scenarios, or data, and it is not affiliated with the original game's publishers or developers.
 
@@ -19,7 +19,9 @@ A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command i
 - Allied and Axis formations including rifle, support, scout, mortar, and armour units.
 - Smooth accelerated movement with continuous velocity, turning, formation separation, and roughly 30 FPS battlefield animation.
 - Improved battle simulation with line of sight, discrete weapon cooldowns, ammunition usage, range falloff, cover, morale, suppression, casualties, objective capture, and battle scoring.
-- Animated unit graphics with facing arrows, status bars, movement bobbing, selection pulses, muzzle flashes, tracers, mortar shells, impacts, explosions, and smoke.
+- Enhanced cached battlefield rendering with layered roads, field furrows, dense tree canopies, hedgerow foliage, multi-building villages, mud tracks, map coordinates, weather overlays, and detailed fog boundaries.
+- Improved unit art with drop shadows, rotated tank hulls and tracks, turrets, infantry weapon silhouettes, scout and mortar icons, selection brackets, movement dust, muzzle flashes, hit flashes, and separate strength, morale, and ammunition bars.
+- Expanded battle effects with glowing tracers, arcing shells, shock rings, sparks, debris, explosions, rolling smoke, rain, low cloud, and clearing sunlight.
 - Orders include Hold, Advance, Defend, Assault, Flank, and Retreat.
 - Enemy neural commander makes a tactical decision every **2 simulated seconds**.
 - Optional player-side AI mode lets the same persistent learning system command both factions.
@@ -27,6 +29,10 @@ A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command i
 - Neural weights and lifetime statistics are silently saved every **10 seconds**.
 - Game state is silently autosaved every **5 seconds**.
 - Autosave, chosen side, explored terrain, and neural brain are loaded automatically on startup.
+- Offline progress is calculated from the last saved activity timestamp and displayed in a modal Windows 95 command report that remains until manually dismissed.
+- Offline rewards persist in a separate campaign profile: Command Points, Supplies, Reinforcement Tokens, and Intelligence Reports.
+- Pending offline reports survive crashes or forced closes and reappear until dismissed, preventing lost reports or duplicate claims.
+- Rewarded offline time is capped at 30 days per claim.
 - Atomic temporary-file replacement reduces save corruption risk.
 - Standard library only; no third-party Python packages are required.
 
@@ -64,8 +70,9 @@ Files:
 - `autosave.json` — battle state, player side, fog-of-war exploration, and post-battle countdown.
 - `tactical_brain.json` — neural weights and lifetime learning statistics.
 - `settings.json` — interface speed and preferred player side.
+- `campaign_profile.json` — last active timestamp, campaign reserves, lifetime offline duration, sessions, and pending offline report.
 
-Starting a new battle or new save preserves the neural brain. Closing the application performs a final game, brain, and settings save.
+Starting a new battle or new save preserves the neural brain and campaign reserves. Closing the application performs a final game, brain, and settings save.
 
 ## Neural Commander
 
@@ -79,16 +86,20 @@ Its actions are Advance, Flank, Hold, Retreat, and Assault. Training rewards acc
 py -3 -m unittest discover -s tests -v
 ```
 
-The test suite covers neural persistence, procedural map generation, side-restricted orders, continuous movement, fog-of-war spotting, save restoration, and automatic ten-second map rotation.
+The test suite covers neural persistence, procedural map generation, side-restricted orders, continuous movement, fog-of-war spotting, save restoration, automatic ten-second map rotation, offline duration formatting, deterministic reward rates, one-time claims, and manual report dismissal persistence.
 
 ## Project Layout
 
 ```text
 main.py                         Application entry point
 run_game.bat                    Windows launcher
-gateway_to_caen/ui.py           Tkinter Windows 95 interface and graphics
+gateway_to_caen/ui.py           Base Tkinter Windows 95 interface
+gateway_to_caen/enhanced_ui.py  Offline progress and enhanced app shell
+gateway_to_caen/terrain_graphics.py Cached terrain and fog rendering
+gateway_to_caen/unit_graphics.py Detailed unit and battle effects
 gateway_to_caen/simulation.py   Tactical simulation, fog, combat, and battle state
 gateway_to_caen/neural.py       Persistent neural Q-network
 gateway_to_caen/persistence.py  Atomic JSON persistence
-tests/                          Neural and simulation tests
+gateway_to_caen/offline.py      Offline rewards and campaign profile
+tests/                          Neural, simulation, and offline tests
 ```
