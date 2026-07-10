@@ -1,0 +1,490 @@
+"""Version 0.6.2 responsiveness, reliable tabs, and neural UI navigation."""
+
+# The mature UI intentionally stays intact. This layer replaces only the hot
+# refresh loops and adds a safe widget-action registry for the visible neural
+# cursor. Human events always win and never return ``break``.
+
+_ORIGINAL_V062_INIT = TacticalCommandApp.__init__
+_ORIGINAL_V062_CLOSE = TacticalCommandApp.close
+_ORIGINAL_V062_REFRESH_CAMPAIGN = TacticalCommandApp._refresh_campaign_panels
+
+
+def _walk_widgets(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk_widgets(child)
+
+
+def _tab_text(notebook, tab_id) -> str:
+    try:
+        return str(notebook.tab(tab_id, "text"))
+    except tk.TclError:
+        return "Tab"
+
+
+def _v062_init(self, root: tk.Tk) -> None:
+    self._human_ui_lock_until = 0.0
+    self._last_diary_refresh = 0.0
+    self._last_overview_refresh = 0.0
+    self._last_panel_refresh = 0.0
+    self._last_panel_signature = None
+    self._last_draw_cost = 0.0
+    self._last_draw_delay = 40
+    self._neural_tab_cycle = 0
+    self._neural_widget_cycles = {}
+    self._neural_pending_tab = None
+    self._neural_overlay = None
+    self._neural_ui_event_guard_until = 0.0
+    self._neural_overlay_label = None
+    self._neural_overlay_text = None
+    _ORIGINAL_V062_INIT(self, root)
+    self._install_neural_ui_overlay()
+    self._bind_responsive_input()
+    self._release_stale_grab()
+    self.status.configure(text="Responsive UI ready — human input always pauses the neural pointer.")
+
+
+def _install_neural_ui_overlay(self) -> None:
+    """Create a non-grabbing pointer overlay used only outside the battlefield."""
+    overlay = tk.Toplevel(self.root)
+    overlay.withdraw()
+    overlay.overrideredirect(True)
+    overlay.configure(bg="#07131d")
+    try:
+        overlay.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    # On Windows this makes the neural overlay click-through. On other window
+    # systems the overlay is hidden immediately whenever a real click begins.
+    try:
+        if self.root.tk.call("tk", "windowingsystem") == "win32":
+            overlay.attributes("-disabled", True)
+    except tk.TclError:
+        pass
+    body = tk.Frame(overlay, bg="#07131d", bd=1, relief="solid")
+    body.pack(fill="both", expand=True)
+    image = self.sprite_manager.ui("neural_cursor") if hasattr(self, "sprite_manager") else None
+    pointer = tk.Label(body, image=image, text="◆" if image is None else "", bg="#07131d", fg="#7fe9ff", bd=0)
+    pointer.image = image
+    pointer.pack(side="left", padx=(2, 0), pady=1)
+    text = tk.Label(body, text="NEURAL", bg="#07131d", fg="#c9f8ff", font=("Segoe UI", 7, "bold"), padx=4)
+    text.pack(side="left", pady=1)
+    self._neural_overlay = overlay
+    self._neural_overlay_label = pointer
+    self._neural_overlay_text = text
+
+
+def _show_neural_ui_cursor(self, x: float, y: float, label: str) -> None:
+    overlay = self._neural_overlay
+    if overlay is None:
+        return
+    if time.perf_counter() < self._human_ui_lock_until:
+        self._hide_neural_ui_cursor()
+        return
+    self._neural_overlay_text.configure(text=label[:24].upper())
+    root_x = self.root.winfo_rootx() + int(x)
+    root_y = self.root.winfo_rooty() + int(y)
+    overlay.geometry(f"+{root_x}+{root_y}")
+    overlay.deiconify()
+    overlay.lift()
+
+
+def _hide_neural_ui_cursor(self) -> None:
+    if self._neural_overlay is not None:
+        try:
+            self._neural_overlay.withdraw()
+        except tk.TclError:
+            pass
+
+
+def _release_stale_grab(self) -> None:
+    """Release only invisible/dead modal grabs; visible dialogs stay modal."""
+    try:
+        current = self.root.grab_current()
+        if current is not None and (not current.winfo_exists() or not current.winfo_viewable()):
+            current.grab_release()
+    except tk.TclError:
+        pass
+
+
+def _manual_global_activity(self, event=None) -> None:
+    if getattr(self, "_neural_injected", False):
+        return
+    self._human_ui_lock_until = time.perf_counter() + 12.0
+    self._hide_neural_ui_cursor()
+    self._release_stale_grab()
+    cursor = getattr(self, "neural_cursor", None)
+    if cursor is not None:
+        cursor.notify_manual_activity()
+
+
+def _notebook_changed(self, event=None) -> None:
+    if not getattr(self, "_neural_injected", False) and time.perf_counter() >= self._neural_ui_event_guard_until:
+        self._manual_global_activity(event)
+    # A newly visible tab gets one immediate refresh without rebuilding every
+    # hidden panel on every timer tick.
+    self._last_panel_signature = None
+    self._last_overview_refresh = 0.0
+
+
+def _bind_responsive_input(self) -> None:
+    for sequence in ("<ButtonPress-1>", "<ButtonPress-2>", "<ButtonPress-3>", "<MouseWheel>", "<KeyPress>"):
+        self.root.bind_all(sequence, self._manual_global_activity, add="+")
+    for widget in _walk_widgets(self.root):
+        if isinstance(widget, ttk.Notebook):
+            widget.bind("<<NotebookTabChanged>>", self._notebook_changed, add="+")
+    # Fix the old N binding: it previously reapplied the existing value instead
+    # of actually toggling it.
+    self.root.bind("<Key-n>", lambda _event: self._set_neural_mouse_from_keyboard(), add="+")
+
+
+def _set_neural_mouse_from_keyboard(self) -> None:
+    self.ai_var.set(not bool(self.ai_var.get()))
+    self._toggle_ai()
+
+
+def _active_main_tab(self):
+    try:
+        return self.tabs.select()
+    except tk.TclError:
+        return ""
+
+
+def _main_tab_name(self) -> str:
+    selected = self._active_main_tab()
+    try:
+        return str(self.tabs.tab(selected, "text"))
+    except tk.TclError:
+        return ""
+
+
+def _is_battlefield_visible(self) -> bool:
+    try:
+        return self._active_main_tab() == str(self.battle_tab) and self.root.state() != "withdrawn"
+    except tk.TclError:
+        return False
+
+
+def _draw_loop_v062(self) -> None:
+    if not self.running:
+        return
+    if self._is_battlefield_visible():
+        started = time.perf_counter()
+        self.anim_time = started
+        self.draw()
+        cost = time.perf_counter() - started
+        self._last_draw_cost = self._last_draw_cost * 0.82 + cost * 0.18
+        # 25 FPS normally, easing to 20/16 FPS only when a very dense battle
+        # genuinely needs it. The simulation remains independent of rendering.
+        if self._last_draw_cost > 0.045:
+            delay = 62
+        elif self._last_draw_cost > 0.028:
+            delay = 50
+        else:
+            delay = 40
+        self._last_draw_delay = delay
+    else:
+        # Hidden canvases no longer consume most of the Tk event loop.
+        delay = 140
+    self.root.after(delay, self._draw_loop)
+
+
+def _refresh_loop_v062(self) -> None:
+    if not self.running:
+        return
+    self._release_stale_grab()
+    now = time.perf_counter()
+    tab = self._main_tab_name()
+
+    self._header()
+    if tab == "Battlefield":
+        self._detail()
+        if now - self._last_overview_refresh >= 1.0:
+            self._overview()
+            self._last_overview_refresh = now
+    elif tab == "Command":
+        self._detail()
+        self._roster()
+    elif tab == "Intelligence":
+        self._contacts()
+        self._objective_list()
+    elif tab == "Neural Network":
+        self._brain()
+    elif tab == "Requisition":
+        self._refresh_campaign_panels()
+    elif tab == "Options":
+        self._persistence()
+        self._campaign()
+
+    # Keep the diary current at a low cost even while hidden.
+    if tab == "War Diary" or now - self._last_diary_refresh >= 1.0:
+        self._events()
+        self._last_diary_refresh = now
+
+    self.sound_manager.consume_events(self.sim.events)
+    if self.sim.battle_over and not self._last_battle_over:
+        self.sound_manager.play("victory" if self.sim.winner == self.sim.player_side else "defeat", force=True)
+    self._last_battle_over = self.sim.battle_over
+    self.root.after(350, self._refresh_loop)
+
+
+def _campaign_panel_signature(self):
+    campaign = self.sim.campaign
+    resource_sig = tuple(
+        (side, campaign.resources[side].manpower, campaign.resources[side].supplies, campaign.resources[side].command_points)
+        for side in SIDES
+    )
+    roster_sig = tuple(
+        (side, len(campaign.rosters[side]), sum(unit.men for unit in campaign.rosters[side]), sum(int(unit.kills) for unit in campaign.rosters[side]))
+        for side in SIDES
+    )
+    return (
+        campaign.battle_index,
+        round(campaign.difficulty, 3),
+        round(campaign.reward_multiplier, 3),
+        len(campaign.requisition_history),
+        resource_sig,
+        roster_sig,
+    )
+
+
+def _refresh_campaign_panels_v062(self) -> None:
+    now = time.perf_counter()
+    signature = self._campaign_panel_signature()
+    if signature == self._last_panel_signature and now - self._last_panel_refresh < 2.0:
+        return
+    _ORIGINAL_V062_REFRESH_CAMPAIGN(self)
+    self._last_panel_signature = signature
+    self._last_panel_refresh = now
+
+
+def _safe_button_text(widget) -> str:
+    try:
+        return str(widget.cget("text"))
+    except tk.TclError:
+        return widget.winfo_class()
+
+
+def _widget_is_safe_for_neural(widget) -> bool:
+    text = _safe_button_text(widget).lower()
+    blocked = (
+        "reset neural", "new save", "exit", "victory", "defeat",
+        "pending offline", "replace", "delete", "erase",
+        "enable neural mouse",  # it must not switch itself off
+    )
+    return not any(token in text for token in blocked)
+
+
+def _notebook_tab_bounds(notebook, tab_id):
+    """Return tab header bounds even on Tk builds where ttk::notebook bbox is empty."""
+    try:
+        x, y, width, height = notebook.bbox(tab_id)
+        if width > 1 and height > 1:
+            return x, y, width, height
+    except tk.TclError:
+        pass
+    try:
+        target_index = notebook.index(tab_id)
+        notebook.update_idletasks()
+        width = max(1, notebook.winfo_width())
+        header_y = min(12, max(2, notebook.winfo_height() - 1))
+        hits = []
+        for px in range(1, width, 3):
+            try:
+                if notebook.index(f"@{px},{header_y}") == target_index:
+                    hits.append(px)
+            except tk.TclError:
+                continue
+        if hits:
+            return min(hits), 1, max(6, max(hits) - min(hits) + 3), 24
+    except tk.TclError:
+        pass
+    return None
+
+
+def _target_for_notebook_tab(self, notebook, tab_id, label_prefix="Tab"):
+    bounds = _notebook_tab_bounds(notebook, tab_id)
+    if bounds is None:
+        return None
+    x, y, width, height = bounds
+    return {
+        "kind": "notebook",
+        "widget": notebook,
+        "tab_id": tab_id,
+        "x": notebook.winfo_rootx() - self.root.winfo_rootx() + x + width / 2,
+        "y": notebook.winfo_rooty() - self.root.winfo_rooty() + y + height / 2,
+        "label": f"{label_prefix}: {_tab_text(notebook, tab_id)}",
+    }
+
+
+def _target_for_widget(self, widget, kind: str, label: str, **extra):
+    try:
+        widget.update_idletasks()
+        if not widget.winfo_ismapped():
+            return None
+        x = widget.winfo_rootx() - self.root.winfo_rootx() + widget.winfo_width() / 2
+        y = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height() / 2
+    except tk.TclError:
+        return None
+    result = {"kind": kind, "widget": widget, "x": x, "y": y, "label": label}
+    result.update(extra)
+    return result
+
+
+def _interactive_targets_in(self, container):
+    targets = []
+    for widget in _walk_widgets(container):
+        if isinstance(widget, ttk.Notebook):
+            try:
+                for tab_id in widget.tabs():
+                    target = self._target_for_notebook_tab(widget, tab_id, "Subtab")
+                    if target:
+                        targets.append(target)
+            except tk.TclError:
+                pass
+        elif isinstance(widget, ttk.Treeview):
+            children = widget.get_children()
+            if children:
+                index = self._neural_widget_cycles.get(str(widget), 0) % len(children)
+                iid = children[index]
+                target = self._target_for_widget(widget, "treeview", f"Select {_safe_button_text(widget)}", iid=iid)
+                if target:
+                    targets.append(target)
+        elif isinstance(widget, ttk.Combobox):
+            target = self._target_for_widget(widget, "combobox", "Change speed")
+            if target:
+                targets.append(target)
+        elif isinstance(widget, (ttk.Button, ttk.Checkbutton)) and _widget_is_safe_for_neural(widget):
+            text = _safe_button_text(widget)
+            target = self._target_for_widget(widget, "invoke", text)
+            if target:
+                targets.append(target)
+        elif isinstance(widget, tk.Text):
+            target = self._target_for_widget(widget, "text", "Review text panel")
+            if target:
+                targets.append(target)
+    return targets
+
+
+def _next_neural_ui_target(self):
+    """Round-robin through every main tab and one safe function within it."""
+    if time.perf_counter() < self._human_ui_lock_until:
+        return None
+    tabs = list(self.tabs.tabs())
+    if not tabs:
+        return None
+    index = self._neural_tab_cycle % len(tabs)
+    tab_id = tabs[index]
+    selected = self.tabs.select()
+    if selected != tab_id:
+        self._neural_pending_tab = tab_id
+        return self._target_for_notebook_tab(self.tabs, tab_id, "Main tab")
+
+    container = self.root.nametowidget(tab_id)
+    candidates = self._interactive_targets_in(container)
+    if candidates:
+        key = f"tab:{tab_id}"
+        action_index = self._neural_widget_cycles.get(key, 0) % len(candidates)
+        self._neural_widget_cycles[key] = action_index + 1
+        target = candidates[action_index]
+    else:
+        target = self._target_for_notebook_tab(self.tabs, tab_id, "Main tab")
+    self._neural_tab_cycle = (self._neural_tab_cycle + 1) % len(tabs)
+    self._neural_pending_tab = None
+    return target
+
+
+def _neural_target_screen(self, target):
+    return float(target.get("x", 0.0)), float(target.get("y", 0.0))
+
+
+def _neural_activate_ui_target(self, target) -> bool:
+    widget = target.get("widget")
+    if widget is None:
+        return False
+    self._neural_injected = True
+    self._neural_ui_event_guard_until = time.perf_counter() + 0.75
+    try:
+        kind = target.get("kind")
+        if kind == "notebook":
+            widget.select(target["tab_id"])
+            widget.event_generate("<<NotebookTabChanged>>")
+        elif kind == "invoke":
+            widget.invoke()
+        elif kind == "treeview":
+            iid = target.get("iid")
+            if iid and widget.exists(iid):
+                widget.selection_set(iid)
+                widget.focus(iid)
+                widget.see(iid)
+                widget.event_generate("<<TreeviewSelect>>")
+        elif kind == "combobox":
+            values = list(widget.cget("values"))
+            if values:
+                current = widget.get()
+                try:
+                    next_index = (values.index(current) + 1) % len(values)
+                except ValueError:
+                    next_index = 0
+                widget.set(values[next_index])
+                widget.event_generate("<<ComboboxSelected>>")
+        elif kind == "text":
+            widget.see("end")
+            widget.focus_set()
+        else:
+            return False
+        self.sound_manager.play("ui_click")
+        self.status.configure(text=f"Neural pointer used {target.get('label', 'a UI control')}.")
+        return True
+    except (tk.TclError, AttributeError, ValueError):
+        return False
+    finally:
+        self._neural_injected = False
+
+
+def _neural_can_navigate_ui(self) -> bool:
+    return (
+        self.running
+        and not self.paused
+        and time.perf_counter() >= self._human_ui_lock_until
+        and self.root.grab_current() is None
+    )
+
+
+def _close_v062(self) -> None:
+    self._hide_neural_ui_cursor()
+    if self._neural_overlay is not None:
+        try:
+            self._neural_overlay.destroy()
+        except tk.TclError:
+            pass
+    _ORIGINAL_V062_CLOSE(self)
+
+
+TacticalCommandApp.__init__ = _v062_init
+TacticalCommandApp._install_neural_ui_overlay = _install_neural_ui_overlay
+TacticalCommandApp._show_neural_ui_cursor = _show_neural_ui_cursor
+TacticalCommandApp._hide_neural_ui_cursor = _hide_neural_ui_cursor
+TacticalCommandApp._release_stale_grab = _release_stale_grab
+TacticalCommandApp._manual_global_activity = _manual_global_activity
+TacticalCommandApp._notebook_changed = _notebook_changed
+TacticalCommandApp._bind_responsive_input = _bind_responsive_input
+TacticalCommandApp._set_neural_mouse_from_keyboard = _set_neural_mouse_from_keyboard
+TacticalCommandApp._active_main_tab = _active_main_tab
+TacticalCommandApp._main_tab_name = _main_tab_name
+TacticalCommandApp._is_battlefield_visible = _is_battlefield_visible
+TacticalCommandApp._draw_loop = _draw_loop_v062
+TacticalCommandApp._refresh_loop = _refresh_loop_v062
+TacticalCommandApp._campaign_panel_signature = _campaign_panel_signature
+TacticalCommandApp._refresh_campaign_panels = _refresh_campaign_panels_v062
+TacticalCommandApp._target_for_notebook_tab = _target_for_notebook_tab
+TacticalCommandApp._target_for_widget = _target_for_widget
+TacticalCommandApp._interactive_targets_in = _interactive_targets_in
+TacticalCommandApp._next_neural_ui_target = _next_neural_ui_target
+TacticalCommandApp._neural_target_screen = _neural_target_screen
+TacticalCommandApp._neural_activate_ui_target = _neural_activate_ui_target
+TacticalCommandApp._neural_can_navigate_ui = _neural_can_navigate_ui
+TacticalCommandApp.close = _close_v062
+TacticalCommandApp.TICK_MS = 40
+TacticalCommandApp.DRAW_MS = 40
+TacticalCommandApp.REFRESH_MS = 350
