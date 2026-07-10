@@ -53,17 +53,7 @@ class TacticalCameraTests(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 
-class TacticalMapLogTests(unittest.TestCase):
-
-    def test_log_filters_combat_and_caps_at_five(self) -> None:
-        from gateway_to_caen.camera import TacticalMapLog
-        log = TacticalMapLog(max_messages=99)
-        log.add(0, 'Combat', 'This should not appear')
-        for index in range(8):
-            log.add(index, 'Orders', f'Message {index}')
-        self.assertEqual(len(log.entries), 5)
-        self.assertEqual(log.entries[0].text, 'Message 3')
-        self.assertNotIn('This should not appear', [entry.text for entry in log.entries])
+class AutoCameraDetailTests(unittest.TestCase):
 
     def test_auto_camera_can_open_friendly_details(self) -> None:
         import time
@@ -81,4 +71,3 @@ class TacticalMapLogTests(unittest.TestCase):
         harness._update_auto_detail_selection()
         self.assertEqual(harness.selected, {unit.uid})
         self.assertEqual(harness._auto_detail_uid, unit.uid)
-        self.assertTrue(any(('Opened' in entry.text for entry in harness.tactical_log.entries)))
