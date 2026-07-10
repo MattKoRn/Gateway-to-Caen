@@ -1,0 +1,113 @@
+        target_x, target_y = self._destination(sim, unit, action)
+        self.plan = CursorPlan(
+            unit.uid,
+            action_index,
+            action,
+            list(state),
+            target_x,
+            target_y,
+            float(sim.battle_score(sim.player_side)),
+            sum(item.men for item in sim.living_units(sim.player_side)),
+            sum(item.men for item in sim.living_units(sim.enemy_side)),
+        )
+        self.target_x, self.target_y = unit.x, unit.y
+        self.phase = "select"
+        self.phase_delay = self.rng.uniform(0.18, 0.48)
+        self.command_label = f"MOVING TO {unit.name.upper()}"
+        self.last_decision = f"{unit.name}: {action.title()}"
+
+    def _destination(self, sim: Any, unit: Any, action: str) -> tuple[float, float]:
+        enemy = sim.nearest_enemy(unit)
+        objective = sim.nearest_objective(unit)
+        if action == "hold":
+            return unit.x, unit.y
+        if action == "retreat":
+            return (1.2 if unit.side == "Allied" else MAP_WIDTH - 2.2), clamp(unit.y + self.rng.uniform(-1.3, 1.3), 0, MAP_HEIGHT - 1)
+        if action == "assault" and enemy:
+            return sim.nearest_clear_position(enemy.x, enemy.y, sim.unit_collision_radius(unit))
+        if action == "flank":
+            anchor_x = enemy.x if enemy else (objective.x if objective else MAP_WIDTH / 2)
+            anchor_y = enemy.y if enemy else (objective.y if objective else MAP_HEIGHT / 2)
+            direction = -1 if (hash(unit.uid) + self.actions_completed) % 2 else 1
+            return sim.nearest_clear_position(anchor_x, clamp(anchor_y + direction * 3.2, 0, MAP_HEIGHT - 1), sim.unit_collision_radius(unit))
+        if objective:
+            return sim.nearest_clear_position(objective.x + self.rng.uniform(-0.7, 0.7), objective.y + self.rng.uniform(-0.7, 0.7), sim.unit_collision_radius(unit))
+        return unit.x, unit.y
+
+    def _click_unit(self, app: Any) -> None:
+        if not self.plan:
+            self.phase = "idle"
+            return
+        unit = app.sim.unit_by_id(self.plan.unit_uid)
+        if not unit or not unit.alive:
+            self.phase = "idle"
+            return
+        app._neural_left_click_world(unit.x, unit.y)
+        self.click_flash = 0.24
+        self.phase = "command"
+        self.phase_delay = self.rng.uniform(0.22, 0.55)
+        self.command_label = f"CLICKING {self.plan.action.upper()}"
+
+    def _click_command(self, app: Any) -> None:
+        if not self.plan:
+            self.phase = "idle"
+            return
+        app._neural_order_button(self.plan.action.title())
+        self.click_flash = 0.22
+        if self.plan.action == "hold":
+            self.phase = "review"
+            self.phase_delay = self.rng.uniform(0.7, 1.2)
+            self.pending_training_at = app.sim.elapsed + 2.2
+            return
+        self.target_x, self.target_y = self.plan.target_x, self.plan.target_y
+        self.phase = "destination"
+        self.phase_delay = self.rng.uniform(0.15, 0.38)
+        self.command_label = "MOVING TO DESTINATION"
+
+    def _click_destination(self, app: Any) -> None:
+        if not self.plan:
+            self.phase = "idle"
+            return
+        app._neural_right_click_world(self.plan.target_x, self.plan.target_y)
+        self.click_flash = 0.30
+        self.actions_completed += 1
+        self.pending_training_at = app.sim.elapsed + 2.4
+        self.phase = "review"
+        self.phase_delay = self.rng.uniform(0.8, 1.5)
+        self.command_label = "WATCHING ORDER EXECUTE"
+
+    def _train_pending(self, sim: Any) -> None:
+        if not self.plan or self.pending_training_at <= 0 or sim.elapsed < self.pending_training_at:
+            return
+        unit = sim.unit_by_id(self.plan.unit_uid)
+        next_state = sim.command_state_vector(unit) if unit and hasattr(sim, "command_state_vector") else (sim.state_vector(unit) if unit else [-1.0] * self.brain.input_size)
+        own_men = sum(item.men for item in sim.living_units(sim.player_side))
+        enemy_men = sum(item.men for item in sim.living_units(sim.enemy_side))
+        score_delta = (sim.battle_score(sim.player_side) - self.plan.score_before) / 180.0
+        casualty_reward = (self.plan.enemy_men_before - enemy_men) * 0.28
+        casualty_penalty = (self.plan.own_men_before - own_men) * 0.42
+        survival = 0.08 if unit and unit.alive else -0.75
+        reward = clamp(score_delta + casualty_reward - casualty_penalty + survival, -2.0, 2.0)
+        self.last_training_error = self.brain.learn_transition(self.plan.state, self.plan.action_index, reward, next_state, terminal=not bool(unit and unit.alive))
+        self.pending_training_at = 0.0
+        self.plan = None
+
+    def draw(self, app: Any) -> None:
+        if not self.enabled:
+            return
+        c = app.canvas
+        w, h = max(1, c.winfo_width()), max(1, c.winfo_height())
+        cw, ch = app._camera_cell_sizes(w, h)
+        x = app._mx(self.world_x, w, cw)
+        y = app._my(self.world_y, h, ch)
+        c.delete("neural-cursor")
+        image = app.sprite_manager.ui("neural_cursor") if hasattr(app, "sprite_manager") else None
+        if image is not None:
+            c.create_image(x, y, image=image, anchor="nw", tags="neural-cursor")
+        else:
+            c.create_polygon(x, y, x, y + 28, x + 8, y + 21, x + 15, y + 34, x + 21, y + 31, x + 14, y + 18, x + 29, y + 18, fill="white", outline="black", tags="neural-cursor")
+        if self.click_flash > 0:
+            radius = 9 + (0.30 - min(0.30, self.click_flash)) * 45
+            c.create_oval(x - radius, y - radius, x + radius, y + radius, outline="#00e5ff", width=2, tags="neural-cursor")
+        c.create_rectangle(x + 18, y + 30, x + 210, y + 47, fill="#08121c", outline="#77d8ff", tags="neural-cursor")
+        c.create_text(x + 24, y + 38, text=self.command_label[:31], anchor="w", fill="#d9f7ff", font=("MS Sans Serif", 7, "bold"), tags="neural-cursor")
