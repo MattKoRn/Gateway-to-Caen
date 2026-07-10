@@ -1,0 +1,127 @@
+        sub.pack(fill="both", expand=True, padx=4, pady=4)
+        game, audio, persist, offline = (ttk.Frame(sub), ttk.Frame(sub), ttk.Frame(sub), ttk.Frame(sub))
+        sub.add(game, text="Gameplay")
+        sub.add(audio, text="Audio & Visual")
+        sub.add(persist, text="Persistence")
+        sub.add(offline, text="Offline Campaign")
+
+        box = tk.LabelFrame(game, text=" Neural Virtual Player ", bg=W95["face"], font=("Segoe UI", 9, "bold"))
+        box.pack(fill="x", padx=10, pady=10)
+        self.ai_check2 = ttk.Checkbutton(box, text="Enable neural mouse commander for my faction", variable=self.ai_var, command=self._toggle_ai)
+        self.ai_check2.pack(anchor="w", padx=10, pady=(8, 4))
+        self.side_info = ttk.Label(box, text="", justify="left", wraplength=740)
+        self.side_info.pack(anchor="w", padx=10, pady=(0, 8))
+
+        camera_box = tk.LabelFrame(game, text=" Tactical Camera ", bg=W95["face"], font=("Segoe UI", 9, "bold"))
+        camera_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.auto_camera_check2 = ttk.Checkbutton(camera_box, text="Follow the visible neural cursor and dynamically zoom", variable=self.auto_camera_var, command=self.toggle_auto_camera)
+        self.auto_camera_check2.pack(anchor="w", padx=10, pady=(8, 4))
+        controls = tk.Frame(camera_box, bg=W95["face"])
+        controls.pack(anchor="w", padx=8, pady=(0, 5))
+        for text, command in (("Focus Selected", self.focus_selected), ("Zoom In", lambda: self._camera_zoom_step(0.18)), ("Zoom Out", lambda: self._camera_zoom_step(-0.18)), ("Full Map", self.camera_overview)):
+            ttk.Button(controls, text=text, command=command).pack(side="left", padx=2)
+        self.camera_status = ttk.Label(camera_box, text="The auto-camera follows the neural cursor. Mouse wheel or middle-drag temporarily switches to manual view.", wraplength=740, justify="left")
+        self.camera_status.pack(anchor="w", padx=10, pady=(0, 8))
+
+        audio_box = tk.LabelFrame(audio, text=" Sound & Rendering ", bg=W95["face"], font=("Segoe UI", 9, "bold"))
+        audio_box.pack(fill="x", padx=10, pady=10)
+        self.sound_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(audio_box, text="Enable interface, weapon, objective, requisition, and result sounds", variable=self.sound_var, command=self._toggle_sound).pack(anchor="w", padx=10, pady=8)
+        ttk.Label(audio_box, text="Unit formations use packaged PNG artwork at three zoom levels. Terrain and obstacles remain cached for performance.", wraplength=740, justify="left").pack(anchor="w", padx=10, pady=(0, 8))
+
+        pbox = tk.LabelFrame(persist, text=" Automatic Saves ", bg=W95["face"], font=("Segoe UI", 9, "bold"))
+        pbox.pack(fill="x", padx=10, pady=10)
+        self.persist = ttk.Label(pbox, text="", justify="left")
+        self.persist.pack(anchor="w", padx=10, pady=10)
+        ttk.Button(pbox, text="Reset Neural Brain", command=self.reset_brain).pack(anchor="w", padx=10, pady=(0, 10))
+
+        cbox = tk.LabelFrame(offline, text=" Offline Command Rewards ", bg=W95["face"], font=("Segoe UI", 9, "bold"))
+        cbox.pack(fill="x", padx=10, pady=10)
+        self.campaign_info = ttk.Label(cbox, text="", justify="left", font=("Consolas", 9))
+        self.campaign_info.pack(anchor="w", padx=10, pady=10)
+        ttk.Button(cbox, text="Show Pending Offline Report", command=self._show_offline_report).pack(anchor="w", padx=10, pady=(0, 10))
+
+    def _statusbar(self) -> None:
+        super()._statusbar()
+        bar = self.brain_label.master
+        self.cursor_status = tk.Label(bar, text="Neural mouse: starting", bg=W95["face"], font=("Segoe UI", 8), bd=1, relief="sunken", width=30)
+        self.cursor_status.pack(side="left", padx=2)
+        self.reward_status = tk.Label(bar, text="Reward scale: 1.00×", bg=W95["face"], font=("Segoe UI", 8), bd=1, relief="sunken", width=20)
+        self.reward_status.pack(side="left", padx=2)
+
+    def _install_requisition_tab(self) -> None:
+        self.requisition_tab = ttk.Frame(self.tabs)
+        try:
+            self.tabs.insert(self.tabs.index(self.options_tab), self.requisition_tab, text="Requisition")
+        except tk.TclError:
+            self.tabs.add(self.requisition_tab, text="Requisition")
+        header = tk.Frame(self.requisition_tab, bg="#14243a", bd=2, relief="raised")
+        header.pack(fill="x", padx=6, pady=6)
+        tk.Label(header, text="NEURAL QUARTERMASTER — BOTH FACTIONS", bg="#14243a", fg="white", font=("Segoe UI", 11, "bold"), anchor="w").pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        self.req_scale = tk.Label(header, text="", bg="#14243a", fg="#f3d36a", font=("Consolas", 9, "bold"))
+        self.req_scale.pack(side="right", padx=8)
+
+        body = tk.PanedWindow(self.requisition_tab, orient="horizontal", sashwidth=5, bg=W95["face"], bd=0)
+        body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        left = tk.Frame(body, bg=W95["face"], bd=2, relief="sunken")
+        right = tk.Frame(body, bg=W95["face"], bd=2, relief="sunken")
+        body.add(left, stretch="always")
+        body.add(right, minsize=440)
+
+        self.req_summary = tk.Text(left, height=12, bg="#f7faf8", font=("Consolas", 9), state="disabled", bd=1, relief="sunken")
+        self.req_summary.pack(fill="x", padx=6, pady=6)
+        cols = ("side", "type", "cost", "reason")
+        self.req_history = ttk.Treeview(left, columns=cols, show="headings", height=12)
+        for key, title, width in (("side", "Side", 70), ("type", "Unit", 90), ("cost", "Cost", 170), ("reason", "Neural rationale", 300)):
+            self.req_history.heading(key, text=title)
+            self.req_history.column(key, width=width, anchor="w")
+        self.req_history.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+        tk.Label(right, text="UNIT COSTS", bg="#203c57", fg="white", font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x")
+        self.cost_tree = ttk.Treeview(right, columns=("mp", "sup", "cp"), show="tree headings", height=6)
+        self.cost_tree.heading("#0", text="Formation")
+        for key, title in (("mp", "MP"), ("sup", "SUP"), ("cp", "CP")):
+            self.cost_tree.heading(key, text=title)
+            self.cost_tree.column(key, width=62, anchor="center")
+        self.cost_tree.column("#0", width=150)
+        for kind in UNIT_TYPES:
+            cost = UNIT_COSTS[kind]
+            self.cost_tree.insert("", "end", iid=f"cost-{kind}", text=kind, values=(cost["manpower"], cost["supplies"], cost["command_points"]))
+        self.cost_tree.pack(fill="x", padx=6, pady=6)
+
+        tk.Label(right, text="CURRENT ROSTERS", bg="#203c57", fg="white", font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", pady=(4, 0))
+        self.req_rosters = ttk.Treeview(right, columns=("side", "type", "men", "xp"), show="tree headings", height=12)
+        self.req_rosters.heading("#0", text="Formation")
+        for key, title, width in (("side", "Side", 65), ("type", "Type", 75), ("men", "Men", 60), ("xp", "XP", 55)):
+            self.req_rosters.heading(key, text=title)
+            self.req_rosters.column(key, width=width, anchor="center")
+        self.req_rosters.column("#0", width=165)
+        self.req_rosters.pack(fill="both", expand=True, padx=6, pady=6)
+        ttk.Button(right, text="Run Neural Requisition for Next Map", command=self._manual_requisition).pack(fill="x", padx=8, pady=(0, 8))
+
+    def _cursor_bindings(self) -> None:
+        self.root.bind("<Key-n>", lambda _event: self._toggle_ai())
+
+    def _game_loop(self) -> None:
+        if not self.running:
+            return
+        now = time.perf_counter()
+        real_dt = min(0.25, now - self.last_tick)
+        self.last_tick = now
+        if not self.paused:
+            if self.sim.battle_over:
+                if self.sim.advance_post_battle(real_dt):
+                    self._new_map_state("Persistent campaign forces deployed to a new map.")
+            else:
+                self.neural_cursor.update(self, real_dt)
+                self.sim.tick(real_dt * self.speed)
+        self.root.after(self.TICK_MS, self._game_loop)
+
+    def draw(self) -> None:
+        super().draw()
+        if hasattr(self, "neural_cursor"):
+            self.neural_cursor.draw(self)
+
+    def _refresh_loop(self) -> None:
+        if not self.running:
+            return
