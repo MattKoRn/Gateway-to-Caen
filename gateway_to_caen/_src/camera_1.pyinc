@@ -1,0 +1,370 @@
+"""Smooth tactical auto-camera, viewport transforms, and manual camera controls."""
+from __future__ import annotations
+import math
+import time
+import tkinter as tk
+from collections import deque
+from dataclasses import dataclass
+from typing import Iterable
+from .simulation import MAP_HEIGHT, MAP_WIDTH, BattleSimulation, Unit, clamp, distance
+from .ui import W95
+
+@dataclass
+class CameraFocus:
+    """A desired camera composition in map coordinates."""
+    x: float
+    y: float
+    zoom: float
+    label: str
+    unit_ids: tuple[str, ...] = ()
+
+@dataclass(frozen=True)
+class TacticalLogEntry:
+    timestamp: float
+    category: str
+    text: str
+
+class TacticalMapLog:
+    """Five-message tactical overlay containing non-combat activity only."""
+    MAX_MESSAGES = 5
+
+    def __init__(self, max_messages: int=MAX_MESSAGES) -> None:
+        self.max_messages = min(self.MAX_MESSAGES, max(1, int(max_messages)))
+        self._entries: deque[TacticalLogEntry] = deque(maxlen=self.max_messages)
+
+    @property
+    def entries(self) -> tuple[TacticalLogEntry, ...]:
+        return tuple(self._entries)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def add(self, timestamp: float, category: str, text: str) -> bool:
+        if str(category).strip().lower() == 'combat':
+            return False
+        clean = ' '.join(str(text).split())
+        if not clean:
+            return False
+        entry = TacticalLogEntry(max(0.0, float(timestamp)), str(category).strip() or 'Activity', clean)
+        if self._entries and self._entries[-1].category == entry.category and (self._entries[-1].text == entry.text):
+            return False
+        self._entries.append(entry)
+        return True
+
+    def ingest(self, events: Iterable[object], start_index: int=0) -> int:
+        materialized = list(events)
+        index = min(max(0, int(start_index)), len(materialized))
+        for event in materialized[index:]:
+            self.add(float(getattr(event, 'timestamp', 0.0)), str(getattr(event, 'category', 'Activity')), str(getattr(event, 'text', '')))
+        return len(materialized)
+
+class TacticalCamera:
+    """Selects action targets and eases a viewport toward them."""
+    MIN_ZOOM = 1.0
+    MAX_ZOOM = 2.85
+
+    def __init__(self, enabled: bool=True) -> None:
+        self.enabled = bool(enabled)
+        self.x = MAP_WIDTH / 2
+        self.y = MAP_HEIGHT / 2
+        self.zoom = 1.0
+        self.target_x = self.x
+        self.target_y = self.y
+        self.target_zoom = self.zoom
+        self.focus_label = 'Operational overview'
+        self.focus_unit_ids: tuple[str, ...] = ()
+        self._decision_elapsed = 999.0
+        self._cycle_index = 0
+        self._last_cycle_time = 0.0
+
+    def reset(self, keep_enabled: bool=True) -> None:
+        enabled = self.enabled if keep_enabled else True
+        self.__init__(enabled=enabled)
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+        if self.enabled:
+            self._decision_elapsed = 999.0
+        else:
+            self.focus_label = 'Manual camera'
+            self.focus_unit_ids = ()
+
+    def overview(self) -> None:
+        self.x = self.target_x = MAP_WIDTH / 2
+        self.y = self.target_y = MAP_HEIGHT / 2
+        self.zoom = self.target_zoom = 1.0
+        self.focus_label = 'Operational overview'
+        self.focus_unit_ids = ()
+
+    def manual_zoom(self, amount: float) -> None:
+        self.set_enabled(False)
+        self.target_zoom = clamp(self.target_zoom + amount, self.MIN_ZOOM, self.MAX_ZOOM)
+        self.zoom = self.target_zoom
+
+    def manual_pan(self, dx_world: float, dy_world: float) -> None:
+        self.set_enabled(False)
+        self.x += dx_world
+        self.y += dy_world
+        self.target_x, self.target_y = (self.x, self.y)
+        self._clamp_position()
+
+    def focus_units(self, units: Iterable[Unit], label: str='Selected units') -> None:
+        living = [unit for unit in units if unit.alive]
+        if not living:
+            return
+        focus = self._fit_units(living, label, single_zoom=2.55)
+        self.target_x, self.target_y, self.target_zoom = (focus.x, focus.y, focus.zoom)
+        self.focus_label = focus.label
+        self.focus_unit_ids = focus.unit_ids
+        self._clamp_target()
+
+    def update(self, sim: BattleSimulation, selected_ids: set[str], dt: float) -> bool:
+        """Update target selection and interpolation. Return whether the view changed."""
+        old_state = (self.x, self.y, self.zoom)
+        dt = clamp(dt, 0.0, 0.25)
+        self._decision_elapsed += dt
+        if self.enabled and self._decision_elapsed >= 0.28:
+            self._decision_elapsed = 0.0
+            focus = self._choose_focus(sim, selected_ids)
+            self.target_x, self.target_y, self.target_zoom = (focus.x, focus.y, focus.zoom)
+            self.focus_label = focus.label
+            self.focus_unit_ids = focus.unit_ids
+            self._clamp_target()
+        if self.enabled:
+            pan_alpha = 1.0 - math.exp(-3.8 * dt)
+            zoom_alpha = 1.0 - math.exp(-2.8 * dt)
+            self.x += (self.target_x - self.x) * pan_alpha
+            self.y += (self.target_y - self.y) * pan_alpha
+            self.zoom += (self.target_zoom - self.zoom) * zoom_alpha
+            self._clamp_position()
+        return any((abs(a - b) > 1e-05 for a, b in zip(old_state, (self.x, self.y, self.zoom))))
+
+    def _choose_focus(self, sim: BattleSimulation, selected_ids: set[str]) -> CameraFocus:
+        if sim.battle_over:
+            return CameraFocus(MAP_WIDTH / 2, MAP_HEIGHT / 2, 1.0, 'After-action overview')
+        selected = [sim.unit_by_id(uid) for uid in selected_ids]
+        selected = [unit for unit in selected if unit and unit.alive and (unit.side == sim.player_side)]
+        if selected:
+            return self._fit_units(selected, 'Selected formation', single_zoom=2.65)
+        visible_enemy_ids = {unit.uid for unit in sim.visible_enemy_units(sim.player_side)}
+        recent_units = [unit for unit in sim.living_units() if (unit.side == sim.player_side or unit.uid in visible_enemy_ids) and (sim.elapsed - unit.last_fire <= 2.8 or sim.elapsed - unit.last_hit <= 3.4)]
+        if recent_units:
+            expanded = list(recent_units)
+            for unit in recent_units:
+                enemy = sim.nearest_enemy(unit)
+                if enemy and (enemy.side == sim.player_side or enemy.uid in visible_enemy_ids):
+                    if distance((unit.x, unit.y), (enemy.x, enemy.y)) <= 8.5:
+                        expanded.append(enemy)
+            return self._fit_units(self._unique_units(expanded), 'Active firefight', single_zoom=2.5)
+        visible_effects = [effect for effect in sim.effects if sim.is_position_visible(effect.x1, effect.y1, sim.player_side) or sim.is_position_visible(effect.x2, effect.y2, sim.player_side)]
+        if visible_effects:
+            effect = max(visible_effects, key=lambda item: (item.kind in ('impact', 'blast'), item.ttl))
+            return CameraFocus(clamp((effect.x1 + effect.x2) / 2, 0, MAP_WIDTH - 1), clamp((effect.y1 + effect.y2) / 2, 0, MAP_HEIGHT - 1), 2.35, 'Incoming fire')
+        active_friendlies = [unit for unit in sim.living_units(sim.player_side) if unit.speed > 0.12 or unit.order in ('Advance', 'Assault', 'Flank', 'Retreat')]
+        if active_friendlies:
+            scored = sorted(active_friendlies, key=lambda unit: (3.0 if unit.order == 'Assault' else 0.0) + unit.speed * 2.0 + unit.suppression / 45.0 + (1.0 if unit.unit_type in ('Scout', 'Armour') else 0.0), reverse=True)
+            lead = scored[:min(3, len(scored))]
+            return self._fit_units(lead, 'Advancing formation', single_zoom=2.25)
+        contested = []
+        for point in sim.control_points:
+            friendly = any((distance((unit.x, unit.y), (point.x, point.y)) <= 3.0 for unit in sim.living_units(sim.player_side)))
+            enemy = any((distance((unit.x, unit.y), (point.x, point.y)) <= 3.0 for unit in sim.visible_enemy_units(sim.player_side)))
+            if abs(point.capture) > 8 or (friendly and enemy):
+                contested.append(point)
+        if contested:
+            point = max(contested, key=lambda item: abs(item.capture))
+            return CameraFocus(point.x + 0.5, point.y + 0.5, 1.85, f'Objective: {point.name}')
+        friendlies = sim.living_units(sim.player_side)
+        if friendlies:
+            if sim.elapsed - self._last_cycle_time >= 5.0:
+                self._cycle_index = (self._cycle_index + 1) % len(friendlies)
+                self._last_cycle_time = sim.elapsed
+            unit = friendlies[self._cycle_index % len(friendlies)]
+            return CameraFocus(unit.x, unit.y, 1.75, f'Unit watch: {unit.name}', (unit.uid,))
+        return CameraFocus(MAP_WIDTH / 2, MAP_HEIGHT / 2, 1.0, 'Operational overview')
+
+    @staticmethod
+    def _unique_units(units: Iterable[Unit]) -> list[Unit]:
+        unique: dict[str, Unit] = {}
+        for unit in units:
+            unique[unit.uid] = unit
+        return list(unique.values())
+
+    def _fit_units(self, units: list[Unit], label: str, single_zoom: float) -> CameraFocus:
+        xs = [unit.x for unit in units]
+        ys = [unit.y for unit in units]
+        center_x = sum(xs) / len(xs)
+        center_y = sum(ys) / len(ys)
+        if len(units) == 1:
+            zoom = single_zoom
+        else:
+            span_x = max(xs) - min(xs) + 2.8
+            span_y = max(ys) - min(ys) + 2.4
+            zoom = min(MAP_WIDTH * 0.68 / max(span_x, 0.1), MAP_HEIGHT * 0.68 / max(span_y, 0.1))
+            zoom = clamp(zoom, 1.25, 2.55)
+        return CameraFocus(center_x, center_y, zoom, label, tuple((unit.uid for unit in units)))
+
+    def _clamp_target(self) -> None:
+        self.target_zoom = clamp(self.target_zoom, self.MIN_ZOOM, self.MAX_ZOOM)
+        half_w = MAP_WIDTH / (2 * self.target_zoom)
+        half_h = MAP_HEIGHT / (2 * self.target_zoom)
+        self.target_x = clamp(self.target_x, half_w, MAP_WIDTH - half_w)
+        self.target_y = clamp(self.target_y, half_h, MAP_HEIGHT - half_h)
+
+    def _clamp_position(self) -> None:
+        self.zoom = clamp(self.zoom, self.MIN_ZOOM, self.MAX_ZOOM)
+        half_w = MAP_WIDTH / (2 * self.zoom)
+        half_h = MAP_HEIGHT / (2 * self.zoom)
+        self.x = clamp(self.x, half_w, MAP_WIDTH - half_w)
+        self.y = clamp(self.y, half_h, MAP_HEIGHT - half_h)
+
+class AutoCameraMixin:
+    """Adds camera transforms, action tracking, controls, and a camera HUD."""
+    camera: TacticalCamera
+
+    def _camera_init(self, enabled: bool) -> None:
+        self.camera = TacticalCamera(enabled=enabled)
+        self._camera_last_frame = time.perf_counter()
+        self._rendered_camera_state: tuple[float, float, float, int, int, str] | None = None
+        self._pan_anchor: tuple[int, int, float, float] | None = None
+        self.tactical_log = TacticalMapLog()
+        self._tactical_event_cursor = 0
+        self._auto_detail_uid: str | None = None
+        self._last_auto_detail_uid: str | None = None
+        self._auto_detail_release_real = 0.0
+        self._auto_detail_next_real = time.perf_counter() + 6.0
+        self._manual_selection_until_real = 0.0
+
+    def _camera_bindings(self) -> None:
+        self.canvas.bind('<MouseWheel>', self._camera_mousewheel, add='+')
+        self.canvas.bind('<Button-4>', lambda event: self._camera_zoom_step(0.18), add='+')
+        self.canvas.bind('<Button-5>', lambda event: self._camera_zoom_step(-0.18), add='+')
+        self.canvas.bind('<ButtonPress-2>', self._camera_pan_start, add='+')
+        self.canvas.bind('<B2-Motion>', self._camera_pan_drag, add='+')
+        self.canvas.bind('<Double-Button-1>', lambda event: self.focus_selected(), add='+')
+        self.roster.bind('<ButtonRelease-1>', self._camera_roster_manual, add='+')
+        self.root.bind('<Key-c>', lambda _event: self.toggle_auto_camera(not self.camera.enabled))
+        self.root.bind('<Key-f>', lambda _event: self.focus_selected())
+        self.root.bind('<Key-plus>', lambda _event: self._camera_zoom_step(0.18))
+        self.root.bind('<Key-minus>', lambda _event: self._camera_zoom_step(-0.18))
+
+    def toggle_auto_camera(self, force: bool | None=None) -> None:
+        enabled = bool(self.auto_camera_var.get()) if force is None and hasattr(self, 'auto_camera_var') else bool(force) if force is not None else not self.camera.enabled
+        self.camera.set_enabled(enabled)
+        if hasattr(self, 'auto_camera_var'):
+            self.auto_camera_var.set(enabled)
+        self.settings['auto_camera'] = enabled
+        self._save_camera_setting()
+        self._record_tactical('Camera', 'Auto camera enabled.' if enabled else 'Manual camera enabled.')
+        if hasattr(self, 'camera_status'):
+            self.camera_status.configure(text='Auto camera enabled' if enabled else 'Manual camera enabled')
+
+    def focus_selected(self) -> None:
+        units = [self.sim.unit_by_id(uid) for uid in self.selected]
+        units = [unit for unit in units if unit and unit.alive]
+        if units:
+            self.camera.set_enabled(True)
+            if hasattr(self, 'auto_camera_var'):
+                self.auto_camera_var.set(True)
+            self.camera.focus_units(units)
+            self.settings['auto_camera'] = True
+            self._save_camera_setting()
+            self._record_tactical('Camera', f"Focused {len(units)} selected unit{('s' if len(units) != 1 else '')}.")
+        else:
+            self.camera._decision_elapsed = 999.0
+            self.camera.set_enabled(True)
+            if hasattr(self, 'auto_camera_var'):
+                self.auto_camera_var.set(True)
+
+    def camera_overview(self) -> None:
+        self.camera.set_enabled(False)
+        self.camera.overview()
+        if hasattr(self, 'auto_camera_var'):
+            self.auto_camera_var.set(False)
+        self.settings['auto_camera'] = False
+        self._save_camera_setting()
+        self._record_tactical('Camera', 'Full-map overview selected.')
+        self.terrain_signature = None
+        self.fog_signature = None
+
+    def _camera_zoom_step(self, amount: float) -> None:
+        self.camera.manual_zoom(amount)
+        if hasattr(self, 'auto_camera_var'):
+            self.auto_camera_var.set(False)
+        self.settings['auto_camera'] = False
+        self._save_camera_setting()
+        self._record_tactical('Camera', f'Manual zoom set to {self.camera.zoom:.2f}x.')
+        self.terrain_signature = None
+        self.fog_signature = None
+
+    def _camera_mousewheel(self, event: tk.Event) -> str:
+        self._camera_zoom_step(0.18 if event.delta > 0 else -0.18)
+        return 'break'
+
+    def _camera_pan_start(self, event: tk.Event) -> None:
+        self._pan_anchor = (event.x, event.y, self.camera.x, self.camera.y)
+        self.camera.set_enabled(False)
+        if hasattr(self, 'auto_camera_var'):
+            self.auto_camera_var.set(False)
+        self._record_tactical('Camera', 'Manual camera pan started.')
+
+    def _camera_pan_drag(self, event: tk.Event) -> None:
+        if not self._pan_anchor:
+            return
+        start_x, start_y, camera_x, camera_y = self._pan_anchor
+        w, h = (max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
+        cw, ch = self._camera_cell_sizes(w, h)
+        orientation = -1.0 if self.sim.player_side == 'Axis' else 1.0
+        self.camera.x = camera_x - orientation * (event.x - start_x) / max(cw, 0.001)
+        self.camera.y = camera_y - (event.y - start_y) / max(ch, 0.001)
+        self.camera.target_x, self.camera.target_y = (self.camera.x, self.camera.y)
+        self.camera._clamp_position()
+        self.camera.target_x, self.camera.target_y = (self.camera.x, self.camera.y)
+        self.settings['auto_camera'] = False
+        self._save_camera_setting()
+
+    def _record_tactical(self, category: str, text: str) -> None:
+        timestamp = float(getattr(getattr(self, 'sim', None), 'elapsed', 0.0))
+        self.tactical_log.add(timestamp, category, text)
+
+    def _sync_tactical_log(self) -> None:
+        events = getattr(getattr(self, 'sim', None), 'events', [])
+        if self._tactical_event_cursor > len(events):
+            self._tactical_event_cursor = 0
+            self.tactical_log.clear()
+        self._tactical_event_cursor = self.tactical_log.ingest(events, self._tactical_event_cursor)
+
+    def _camera_roster_manual(self, _event: tk.Event) -> None:
+
+        def record() -> None:
+            self._manual_selection_until_real = time.perf_counter() + 12.0
+            self._auto_detail_uid = None
+            units = [self.sim.unit_by_id(uid) for uid in self.selected]
+            units = [unit for unit in units if unit and unit.alive]
+            if units:
+                self._record_tactical('Selection', f"Opened details for {', '.join((unit.name for unit in units[:2]))}.")
+        self.root.after(1, record)
+
+    def _left(self, event: tk.Event) -> None:
+        super()._left(event)
+        self._manual_selection_until_real = time.perf_counter() + 12.0
+        self._auto_detail_uid = None
+        units = [self.sim.unit_by_id(uid) for uid in self.selected]
+        units = [unit for unit in units if unit and unit.alive]
+        if units:
+            self._record_tactical('Selection', f"Selected {', '.join((unit.name for unit in units[:2]))}.")
+        else:
+            self._record_tactical('Selection', 'Unit selection cleared.')
+
+    def _motion(self, event: tk.Event) -> None:
+        super()._motion(event)
+        x, y = self._from_canvas(event)
+        obstacle = self.sim.obstacle_at(x, y, padding=0.22)
+        if obstacle is not None:
+            current = str(self.hint.cget('text'))
+            movement = 'blocks movement' if obstacle.blocks_movement else 'rough ground'
+            sight = ', blocks sight' if obstacle.blocks_los else ''
+            self.hint.configure(text=f'{current}\nObstacle: {obstacle.label} — {movement}{sight}.')
+
+    def _update_auto_detail_selection(self) -> None:
+        now = time.perf_counter()
