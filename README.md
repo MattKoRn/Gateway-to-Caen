@@ -4,7 +4,16 @@ A dependency-free **Python/Tkinter tactical campaign** with procedural maps, per
 
 > This is an original clean-room project inspired by the broad tactical-command genre. It contains no proprietary Close Combat code, artwork, maps, audio, scenarios, or data and is not affiliated with the original publishers or developers.
 
-## Version 0.6.1 highlights
+## Version 0.6.2 highlights
+
+### Responsiveness and full neural UI control
+
+- The battlefield renderer sleeps while another main tab is open and adapts its frame interval to actual render cost.
+- Hidden trees, intelligence panels, neural statistics, and requisition rosters are no longer rebuilt every 250 milliseconds.
+- Human clicks and keypresses always pause and hide the neural pointer for twelve seconds; stale invisible modal grabs are released automatically.
+- The visible neural pointer can round-robin through every main tab and safely operate notebook subtabs, buttons, checkboxes, tree selections, text panels, and comboboxes.
+- Destructive controls such as reset, replace-save, forced-result, and exit remain human-only.
+- The auto-camera follows the neural pointer on the battlefield and holds its current map view while the pointer is operating the interface.
 
 ### Persistent campaign
 
@@ -38,7 +47,7 @@ The player faction receives **no direct simulation auto-orders**. When enabled, 
 5. It right-clicks through the same tactical-map handler used by a human.
 6. It pauses to observe the result and trains from casualties, survival, score, and objective progress.
 
-The cursor uses an expanded `18 → 32 → 5` Q-network with adaptive exploration, prioritised replay memory, gradient clipping, learning-rate decay, and legacy-brain migration. The auto-camera follows the cursor and dynamically zooms around its current action. Manual input pauses the virtual player for eight seconds.
+The cursor uses an expanded `18 → 32 → 5` Q-network with adaptive exploration, prioritised replay memory, gradient clipping, learning-rate decay, and legacy-brain migration. The auto-camera follows the cursor and dynamically zooms around its current action. Manual input pauses and hides the virtual player for twelve seconds.
 
 ### Smart conventional enemy AI
 
