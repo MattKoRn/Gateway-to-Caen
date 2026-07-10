@@ -1,0 +1,177 @@
+        if self._auto_detail_uid and now >= self._auto_detail_release_real:
+            if self.selected == {self._auto_detail_uid}:
+                self.selected.clear()
+            self._auto_detail_uid = None
+        if not self.camera.enabled or self.sim.battle_over or now < self._auto_detail_next_real or (now < self._manual_selection_until_real) or (self.selected and self._auto_detail_uid is None):
+            return
+        candidates = [self.sim.unit_by_id(uid) for uid in self.camera.focus_unit_ids]
+        candidates = [unit for unit in candidates if unit and unit.alive and (unit.side == self.sim.player_side)]
+        if not candidates:
+            candidates = sorted(self.sim.living_units(self.sim.player_side), key=lambda unit: distance((unit.x, unit.y), (self.camera.x, self.camera.y)))[:3]
+        if not candidates:
+            return
+        alternatives = [unit for unit in candidates if unit.uid != self._last_auto_detail_uid]
+        unit = (alternatives or candidates)[int(self.sim.elapsed) % len(alternatives or candidates)]
+        self.selected = {unit.uid}
+        self._auto_detail_uid = unit.uid
+        self._last_auto_detail_uid = unit.uid
+        self._auto_detail_release_real = now + 4.5
+        interval = 9.0 + (self.sim.seed + int(self.sim.elapsed * 10)) % 6
+        self._auto_detail_next_real = now + interval
+        self._record_tactical('Auto Cam', f'Opened {unit.name} details for a closer look.')
+
+    def _draw_tactical_log(self, c: tk.Canvas, w: float, h: float) -> None:
+        entries = self.tactical_log.entries
+        if not entries:
+            return
+        panel_width = min(520, max(300, int(w * 0.58)))
+        line_height = 17
+        panel_height = 25 + line_height * len(entries)
+        x1, y1 = (8, h - panel_height - 9)
+        x2, y2 = (x1 + panel_width, h - 9)
+        c.create_rectangle(x1 + 3, y1 + 3, x2 + 3, y2 + 3, fill='#080a08', outline='', stipple='gray50', tags='frame')
+        c.create_rectangle(x1, y1, x2, y2, fill='#111611', outline='#d0d0d0', width=1, tags='frame')
+        c.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y1 + 22, fill=W95['navy'], outline='', tags='frame')
+        c.create_text(x1 + 7, y1 + 12, text='TACTICAL ACTIVITY — NON-COMBAT — 5 MAX', anchor='w', fill='white', font=('MS Sans Serif', 8, 'bold'), tags='frame')
+        max_chars = max(32, int((panel_width - 20) / 6.2))
+        for index, entry in enumerate(entries):
+            minutes, seconds = divmod(int(entry.timestamp), 60)
+            prefix = f'[{minutes:02d}:{seconds:02d}] {entry.category.upper()}: '
+            message = prefix + entry.text
+            if len(message) > max_chars:
+                message = message[:max_chars - 1] + '…'
+            c.create_text(x1 + 8, y1 + 31 + index * line_height, text=message, anchor='w', fill='#e8efe3', font=('Courier New', 8), tags='frame')
+
+    def _save_camera_setting(self) -> None:
+        try:
+            from .persistence import atomic_write_json
+            atomic_write_json(self.settings_path, self.settings)
+        except (OSError, AttributeError):
+            pass
+
+    def _camera_cell_sizes(self, w: float, h: float) -> tuple[float, float]:
+        return (w / MAP_WIDTH * self.camera.zoom, h / MAP_HEIGHT * self.camera.zoom)
+
+    def _mx(self, x: float, width: float, cell: float, center: bool=True) -> float:
+        world_x = x + (0.5 if center else 0.0)
+        orientation = -1.0 if self.sim.player_side == 'Axis' else 1.0
+        return width / 2 + orientation * (world_x - self.camera.x) * cell
+
+    def _my(self, y: float, height: float, cell: float, center: bool=True) -> float:
+        world_y = y + (0.5 if center else 0.0)
+        return height / 2 + (world_y - self.camera.y) * cell
+
+    def _tile_rect(self, x: int, y: int, w: float, h: float, cw: float, ch: float) -> tuple[float, float, float, float]:
+        left = self._mx(x, w, cw, center=False)
+        right = self._mx(x + 1, w, cw, center=False)
+        top = self._my(y, h, ch, center=False)
+        bottom = self._my(y + 1, h, ch, center=False)
+        return (min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+
+    def _from_canvas(self, event: tk.Event) -> tuple[float, float]:
+        w, h = (max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height()))
+        cw, ch = self._camera_cell_sizes(w, h)
+        orientation = -1.0 if self.sim.player_side == 'Axis' else 1.0
+        x = self.camera.x + orientation * (event.x - w / 2) / max(cw, 0.001)
+        y = self.camera.y + (event.y - h / 2) / max(ch, 0.001)
+        return (clamp(x, 0, MAP_WIDTH - 0.001), clamp(y, 0, MAP_HEIGHT - 0.001))
+
+    def draw(self) -> None:
+        c = self.canvas
+        w, h = (max(1, c.winfo_width()), max(1, c.winfo_height()))
+        now = time.perf_counter()
+        dt = min(0.25, now - self._camera_last_frame)
+        self._camera_last_frame = now
+        self.camera.update(self.sim, self.selected, dt)
+        self._sync_tactical_log()
+        self._update_auto_detail_selection()
+        cw, ch = self._camera_cell_sizes(w, h)
+        signature = (self.sim.seed, w, h, self.sim.player_side, len(self.sim.obstacles))
+        current_state = (self.camera.x, self.camera.y, self.camera.zoom, w, h, self.sim.player_side)
+        if signature != self.terrain_signature:
+            c.delete('all')
+            c.create_rectangle(0, 0, w, h, fill='#263326', outline='', tags='backdrop')
+            self._draw_battlefield_background(c, w, h, cw, ch)
+            self.terrain_signature = signature
+            self.fog_signature = None
+            self._rendered_camera_state = current_state
+        else:
+            self._transform_cached_layers(c, current_state)
+        visible = self.sim.current_visible_tiles(self.sim.player_side)
+        explored = self.sim.explored_tiles[self.sim.player_side]
+        fog_signature = (self.sim.seed, self.sim.player_side, frozenset(visible), frozenset(explored))
+        if fog_signature != self.fog_signature:
+            c.delete('fog')
+            self._draw_fog(c, w, h, cw, ch, visible, explored)
+            self.fog_signature = fog_signature
+        c.delete('frame')
+        self._draw_objectives(c, w, cw, ch, visible, explored)
+        for unit in self.sim.living_units():
+            if unit.side != self.sim.player_side and (not self.sim.is_unit_visible(unit, self.sim.player_side)):
+                continue
+            self._draw_unit(c, unit, w, h, cw, ch)
+        self._draw_effects(c, w, cw, ch)
+        self._draw_obstacle_effects(c, w, h, cw, ch)
+        self._draw_weather(c, w, h)
+        if self.hover:
+            x, y = self.hover
+            x1, y1, x2, y2 = self._tile_rect(x, y, w, h, cw, ch)
+            c.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, outline='#f8f8f8', width=2, tags='frame')
+        self._draw_camera_hud(c, w, h)
+        self._draw_tactical_log(c, w, h)
+        c.create_rectangle(1, 1, w - 2, h - 2, outline='#101510', width=3, tags='frame')
+        if self.sim.battle_over:
+            self._draw_battle_overlay(c, w, h)
+
+    def _transform_cached_layers(self, c: tk.Canvas, current: tuple[float, float, float, int, int, str]) -> None:
+        old = self._rendered_camera_state
+        if old is None or old[3:] != current[3:]:
+            self.terrain_signature = None
+            return
+        old_x, old_y, old_zoom, w, h, _side = old
+        new_x, new_y, new_zoom, *_ = current
+        if max(abs(old_x - new_x), abs(old_y - new_y), abs(old_zoom - new_zoom)) < 1e-05:
+            return
+        ratio = new_zoom / max(old_zoom, 0.001)
+        for tag in ('terrain', 'fog'):
+            c.scale(tag, w / 2, h / 2, ratio, ratio)
+        orientation = -1.0 if self.sim.player_side == 'Axis' else 1.0
+        dx = orientation * (old_x - new_x) * (w / MAP_WIDTH) * new_zoom
+        dy = (old_y - new_y) * (h / MAP_HEIGHT) * new_zoom
+        for tag in ('terrain', 'fog'):
+            c.move(tag, dx, dy)
+        self._rendered_camera_state = current
+
+    def _draw_battlefield_background(self, c: tk.Canvas, w: float, h: float, cw: float, ch: float) -> None:
+        for y, row in enumerate(self.sim.terrain):
+            for x, terrain in enumerate(row):
+                self._draw_terrain_tile(c, x, y, terrain, w, h, cw, ch)
+        for obstacle in self.sim.obstacles:
+            self._draw_obstacle(c, obstacle, w, h, cw, ch)
+        for x in range(MAP_WIDTH + 1):
+            px = self._mx(x, w, cw, center=False)
+            c.create_line(px, self._my(0, h, ch, center=False), px, self._my(MAP_HEIGHT, h, ch, center=False), fill='#192119', stipple='gray75', tags='terrain')
+        for y in range(MAP_HEIGHT + 1):
+            py = self._my(y, h, ch, center=False)
+            c.create_line(self._mx(0, w, cw, center=False), py, self._mx(MAP_WIDTH, w, cw, center=False), py, fill='#192119', stipple='gray75', tags='terrain')
+        top = self._my(0, h, ch, center=False) + 8
+        for x in range(0, MAP_WIDTH, 2):
+            c.create_text(self._mx(x, w, cw), top, text=f'{x:02d}', fill='#d7dfd0', font=('Courier New', 6, 'bold'), tags='terrain')
+
+    def _draw_camera_hud(self, c: tk.Canvas, w: float, h: float) -> None:
+        mode = 'AUTO CAMERA' if self.camera.enabled else 'MANUAL CAMERA'
+        label = f'{mode}  |  {self.camera.focus_label}  |  {self.camera.zoom:.2f}x'
+        c.create_rectangle(8, 8, min(w - 8, 390), 31, fill='#101510', outline='#d6d6d6', tags='frame')
+        c.create_rectangle(10, 10, 92, 29, fill=W95['navy'] if self.camera.enabled else '#555555', outline='', tags='frame')
+        c.create_text(51, 19, text='AUTO CAM' if self.camera.enabled else 'MANUAL', fill='white', font=('MS Sans Serif', 8, 'bold'), tags='frame')
+        c.create_text(99, 19, text=label.split('|', 1)[1].strip(), anchor='w', fill='#f0f0f0', font=('MS Sans Serif', 8, 'bold'), tags='frame')
+
+    def _draw_battle_overlay(self, c: tk.Canvas, w: float, h: float) -> None:
+        remain = math.ceil(self.sim.seconds_until_next_battle)
+        c.create_rectangle(w * 0.2 + 4, h * 0.36 + 4, w * 0.8 + 4, h * 0.64 + 4, fill='#202020', outline='', tags='frame')
+        c.create_rectangle(w * 0.2, h * 0.36, w * 0.8, h * 0.64, fill=W95['face'], outline='white', width=3, tags='frame')
+        c.create_rectangle(w * 0.205, h * 0.37, w * 0.795, h * 0.405, fill=W95['navy'], outline='', tags='frame')
+        c.create_text(w / 2, h * 0.388, text='AFTER ACTION REPORT', fill='white', font=('MS Sans Serif', 10, 'bold'), tags='frame')
+        c.create_text(w / 2, h * 0.47, text='BATTLE CONCLUDED', font=('MS Sans Serif', 18, 'bold'), tags='frame')
+        c.create_text(w / 2, h * 0.55, text=f'{self.sim.winner} victory', fill=W95['navy'], font=('MS Sans Serif', 14, 'bold'), tags='frame')
+        c.create_text(w / 2, h * 0.6, text=f"Next map in {remain} second{('s' if remain != 1 else '')}", font=('MS Sans Serif', 10, 'bold'), tags='frame')
