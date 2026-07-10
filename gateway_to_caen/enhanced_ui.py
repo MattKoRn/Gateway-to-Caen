@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from .camera import AutoCameraMixin
 from .graphics import EnhancedGraphicsMixin
 from .neural import TacticalBrain
 from .offline import (
@@ -14,26 +15,42 @@ from .offline import (
     format_duration,
     touch_profile,
 )
-from .persistence import user_data_dir
+from .persistence import read_json, user_data_dir
 from .ui import TacticalCommandApp as BaseTacticalCommandApp, W95
 
 
-class TacticalCommandApp(EnhancedGraphicsMixin, BaseTacticalCommandApp):
-    """Version 0.3 application with offline progress and richer rendering."""
+class TacticalCommandApp(AutoCameraMixin, EnhancedGraphicsMixin, BaseTacticalCommandApp):
+    """Version 0.4 application with offline progress, enhanced graphics, and auto camera."""
 
     def __init__(self, root: tk.Tk) -> None:
         data_dir = user_data_dir()
         self.profile_path = data_dir / "campaign_profile.json"
         self.profile, self.offline_report = claim_offline_progress(self.profile_path)
+        camera_settings = read_json(data_dir / "settings.json", {})
+        self._camera_init(bool(camera_settings.get("auto_camera", True)))
         self.terrain_signature: tuple[int, int, int, str] | None = None
         self.fog_signature: tuple[object, ...] | None = None
         super().__init__(root)
+        self._camera_bindings()
+        self.roster.bind("<Double-1>", lambda _event: self.focus_selected(), add="+")
         if self.offline_report is not None:
             root.after(180, self._show_offline_report)
 
     def _toolbar(self) -> None:
         super()._toolbar()
         toolbar = self.operation.master
+        self.auto_camera_var = tk.BooleanVar(value=self.camera.enabled)
+        self.auto_camera_check = ttk.Checkbutton(
+            toolbar,
+            text="Auto Camera",
+            variable=self.auto_camera_var,
+            command=self.toggle_auto_camera,
+        )
+        self.auto_camera_check.pack(side="left", padx=(8, 2))
+        ttk.Button(toolbar, text="Focus", command=self.focus_selected, width=7).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="−", command=lambda: self._camera_zoom_step(-0.18), width=3).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="+", command=lambda: self._camera_zoom_step(0.18), width=3).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="Overview", command=self.camera_overview, width=9).pack(side="left", padx=1)
         self.wallet_label = ttk.Label(toolbar, text="CP 0 | SUP 0", font=("MS Sans Serif", 8, "bold"))
         self.wallet_label.pack(side="right", padx=8)
 
@@ -56,6 +73,27 @@ class TacticalCommandApp(EnhancedGraphicsMixin, BaseTacticalCommandApp):
         self.ai_check2.pack(anchor="w", padx=10, pady=8)
         self.side_info = ttk.Label(box, text="", justify="left")
         self.side_info.pack(anchor="w", padx=10, pady=(0, 8))
+        camera_box = tk.LabelFrame(game, text=" Tactical Camera ", bg=W95["face"], font=("MS Sans Serif", 9, "bold"))
+        camera_box.pack(fill="x", padx=10, pady=(0, 10))
+        self.auto_camera_check2 = ttk.Checkbutton(
+            camera_box,
+            text="Follow active combat and dynamically zoom",
+            variable=self.auto_camera_var,
+            command=self.toggle_auto_camera,
+        )
+        self.auto_camera_check2.pack(anchor="w", padx=10, pady=(8, 4))
+        controls = tk.Frame(camera_box, bg=W95["face"])
+        controls.pack(anchor="w", padx=8, pady=(0, 5))
+        ttk.Button(controls, text="Focus Selected", command=self.focus_selected).pack(side="left", padx=2)
+        ttk.Button(controls, text="Zoom In", command=lambda: self._camera_zoom_step(0.18)).pack(side="left", padx=2)
+        ttk.Button(controls, text="Zoom Out", command=lambda: self._camera_zoom_step(-0.18)).pack(side="left", padx=2)
+        ttk.Button(controls, text="Full Map", command=self.camera_overview).pack(side="left", padx=2)
+        self.camera_status = ttk.Label(
+            camera_box,
+            text="Mouse wheel zooms; middle-drag pans. C toggles auto camera and F focuses selected units.",
+            justify="left",
+        )
+        self.camera_status.pack(anchor="w", padx=10, pady=(0, 8))
 
         pbox = tk.LabelFrame(persist, text=" Automatic Saves ", bg=W95["face"], font=("MS Sans Serif", 9, "bold"))
         pbox.pack(fill="x", padx=10, pady=10)
@@ -106,6 +144,8 @@ class TacticalCommandApp(EnhancedGraphicsMixin, BaseTacticalCommandApp):
                 "Brain autosave: every 10 seconds\n"
                 "Offline timestamp: every game save\n"
                 "Map rotation: 10 seconds after battle end\n"
+                f"Auto camera: {'Enabled' if self.camera.enabled else 'Manual'}\n"
+                f"Camera focus: {self.camera.focus_label} at {self.camera.zoom:.2f}x\n"
                 f"Player side: {self.sim.player_side}\n"
                 f"Last status: {self.last_save}\n\n"
                 f"Game: {self.save_path}\n"
@@ -224,18 +264,40 @@ class TacticalCommandApp(EnhancedGraphicsMixin, BaseTacticalCommandApp):
 
     def load(self) -> None:
         super().load()
+        self.camera.overview()
+        self.camera.set_enabled(bool(self.auto_camera_var.get()))
         self.terrain_signature = None
         self.fog_signature = None
+        self._rendered_camera_state = None
 
     def _new_map_state(self, message: str) -> None:
+        self.camera.reset(keep_enabled=True)
+        if hasattr(self, "auto_camera_var"):
+            self.auto_camera_var.set(self.camera.enabled)
         self.terrain_signature = None
         self.fog_signature = None
+        self._rendered_camera_state = None
         super()._new_map_state(message)
+
+    def controls(self) -> None:
+        messagebox.showinfo(
+            "Controls",
+            "Left-click: select a friendly unit\n"
+            "Shift + left-click: multi-select\n"
+            "Right-click: issue movement order\n"
+            "Mouse wheel: manual zoom (disables auto camera)\n"
+            "Middle-drag: pan camera (disables auto camera)\n"
+            "C: toggle auto camera\n"
+            "F or double-click: focus selected units\n\n"
+            "When enabled, the auto camera follows selected formations, active firefights, "
+            "incoming fire, advancing units, and contested objectives while dynamically zooming.",
+            parent=self.root,
+        )
 
     def about(self) -> None:
         messagebox.showinfo(
             "About",
-            "Gateway to Caen: Tactical Command\nVersion 0.3.0\n\n"
+            "Gateway to Caen: Tactical Command\nVersion 0.4.0\n\n"
             "An original clean-room tactical game built with Python and Tkinter. "
             "No proprietary code or assets are included.",
             parent=self.root,
