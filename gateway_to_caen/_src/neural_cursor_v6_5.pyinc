@@ -1,0 +1,65 @@
+"""Version 0.6.3: restrict the neural pointer to tactical-map actions only."""
+
+_PREVIOUS_CURSOR_INIT_V063 = NeuralCursorController.__init__
+_PREVIOUS_CURSOR_RESET_V063 = NeuralCursorController.reset_for_map
+
+
+def _cursor_init_v063(self, brain, seed: int = 0, enabled: bool = True) -> None:
+    _PREVIOUS_CURSOR_INIT_V063(self, brain, seed, enabled)
+    self.ui_mode = False
+    self.ui_target = None
+    self.next_ui_visit_at = float("inf")
+    self.ui_actions_completed = 0
+
+
+def _cursor_reset_v063(self, sim) -> None:
+    _PREVIOUS_CURSOR_RESET_V063(self, sim)
+    self.ui_mode = False
+    self.ui_target = None
+    self.next_ui_visit_at = float("inf")
+
+
+def _cursor_start_ui_disabled_v063(self, app, target) -> None:
+    """Ignore all non-battlefield UI targets, including tabs and controls."""
+    self.ui_mode = False
+    self.ui_target = None
+    self.next_ui_visit_at = float("inf")
+    if hasattr(app, "_hide_neural_ui_cursor"):
+        app._hide_neural_ui_cursor()
+
+
+def _cursor_update_ui_disabled_v063(self, app, dt: float) -> None:
+    self._cursor_cancel_ui(app)
+    self.next_ui_visit_at = float("inf")
+
+
+def _cursor_update_v063(self, app, dt: float) -> None:
+    # Cancel any stale UI-space state from a prior save/session and run the
+    # original tactical-map state machine exclusively. When the user is viewing
+    # another tab the neural pointer waits instead of issuing hidden map clicks
+    # or dragging the interface back to Battlefield.
+    if getattr(self, "ui_mode", False) or getattr(self, "ui_target", None) is not None:
+        self._cursor_cancel_ui(app)
+    self.next_ui_visit_at = float("inf")
+    if hasattr(app, "_is_battlefield_visible") and not app._is_battlefield_visible():
+        self.command_label = "WAITING FOR TACTICAL MAP"
+        if hasattr(app.camera, "clear_cursor_focus"):
+            app.camera.clear_cursor_focus()
+        if hasattr(app, "_hide_neural_ui_cursor"):
+            app._hide_neural_ui_cursor()
+        return
+    _ORIGINAL_CURSOR_UPDATE_V062(self, app, dt)
+
+
+def _cursor_draw_v063(self, app) -> None:
+    if hasattr(app, "_hide_neural_ui_cursor"):
+        app._hide_neural_ui_cursor()
+    _ORIGINAL_CURSOR_DRAW_V062(self, app)
+
+
+NeuralCursorController.__init__ = _cursor_init_v063
+NeuralCursorController.reset_for_map = _cursor_reset_v063
+NeuralCursorController._start_ui_navigation = _cursor_start_ui_disabled_v063
+NeuralCursorController._update_ui_navigation = _cursor_update_ui_disabled_v063
+NeuralCursorController.update = _cursor_update_v063
+NeuralCursorController.draw = _cursor_draw_v063
