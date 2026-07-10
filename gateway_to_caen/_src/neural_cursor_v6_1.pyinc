@@ -1,0 +1,143 @@
+"""Visible neural virtual-player cursor that uses the same UI actions as a human."""
+from __future__ import annotations
+
+import math
+import random
+import time
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
+
+from .camera import CameraFocus, TacticalCamera
+from .neural import ACTIONS
+from .simulation import MAP_HEIGHT, MAP_WIDTH, clamp, distance
+
+
+class CursorFollowingCamera(TacticalCamera):
+    def __init__(self, enabled: bool = True) -> None:
+        super().__init__(enabled=enabled)
+        self.cursor_focus: tuple[float, float, float, str] | None = None
+
+    def follow_cursor(self, x: float, y: float, zoom: float = 2.1, label: str = "Neural cursor") -> None:
+        self.cursor_focus = (x, y, zoom, label)
+
+    def clear_cursor_focus(self) -> None:
+        self.cursor_focus = None
+
+    def _choose_focus(self, sim, selected_ids):
+        if self.cursor_focus and not sim.battle_over:
+            x, y, zoom, label = self.cursor_focus
+            return CameraFocus(clamp(x, 0, MAP_WIDTH - 1), clamp(y, 0, MAP_HEIGHT - 1), clamp(zoom, self.MIN_ZOOM, self.MAX_ZOOM), label)
+        return super()._choose_focus(sim, selected_ids)
+
+
+@dataclass
+class CursorPlan:
+    unit_uid: str
+    action_index: int
+    action: str
+    state: list[float]
+    target_x: float
+    target_y: float
+    score_before: float
+    own_men_before: int
+    enemy_men_before: int
+
+
+class NeuralCursorController:
+    """Moves, pauses, selects, clicks, and orders through the tactical UI."""
+
+    def __init__(self, brain, seed: int = 0, enabled: bool = True) -> None:
+        self.brain = brain
+        self.enabled = bool(enabled)
+        self.rng = random.Random(seed ^ 0xC0FFEE)
+        self.world_x = MAP_WIDTH * 0.25
+        self.world_y = MAP_HEIGHT * 0.5
+        self.target_x = self.world_x
+        self.target_y = self.world_y
+        self.phase = "idle"
+        self.phase_delay = 0.8
+        self.next_plan_delay = 0.8
+        self.plan: CursorPlan | None = None
+        self.click_flash = 0.0
+        self.command_label = "OBSERVING"
+        self.last_decision = "Waiting"
+        self.last_training_error = 0.0
+        self.manual_pause_until = 0.0
+        self.pending_training_at = 0.0
+        self.actions_completed = 0
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = bool(enabled)
+        if not enabled:
+            self.phase = "idle"
+            self.plan = None
+
+    def notify_manual_activity(self) -> None:
+        self.manual_pause_until = time.perf_counter() + 8.0
+
+    def reset_for_map(self, sim: Any) -> None:
+        self.world_x = 2.0 if sim.player_side == "Allied" else MAP_WIDTH - 3.0
+        self.world_y = MAP_HEIGHT / 2
+        self.target_x, self.target_y = self.world_x, self.world_y
+        self.phase = "idle"
+        self.phase_delay = self.rng.uniform(0.7, 1.3)
+        self.plan = None
+        self.pending_training_at = 0.0
+        self.command_label = "SURVEYING NEW MAP"
+
+    def update(self, app: Any, dt: float) -> None:
+        sim = app.sim
+        dt = clamp(dt, 0.0, 0.25)
+        self.click_flash = max(0.0, self.click_flash - dt)
+        if not self.enabled or sim.battle_over or app.paused:
+            if hasattr(app.camera, "clear_cursor_focus"):
+                app.camera.clear_cursor_focus()
+            return
+        if time.perf_counter() < self.manual_pause_until:
+            self.command_label = "YIELDING TO MANUAL INPUT"
+            return
+
+        self._train_pending(sim)
+        self.phase_delay -= dt
+        speed = 4.6 + self.rng.random() * 1.0
+        dx, dy = self.target_x - self.world_x, self.target_y - self.world_y
+        dist = math.hypot(dx, dy)
+        if dist > 0.025:
+            step = min(dist, speed * dt)
+            self.world_x += dx / dist * step
+            self.world_y += dy / dist * step
+        zoom = 2.45 if self.phase in ("select", "command") else 2.05
+        if hasattr(app.camera, "follow_cursor"):
+            app.camera.follow_cursor(self.world_x, self.world_y, zoom, f"Neural mouse: {self.command_label.title()}")
+
+        if dist > 0.12 or self.phase_delay > 0:
+            return
+        if self.phase == "idle": self._make_plan(app)
+        elif self.phase == "select": self._click_unit(app)
+        elif self.phase == "command": self._click_command(app)
+        elif self.phase == "destination": self._click_destination(app)
+        elif self.phase == "review":
+            self.phase = "idle"
+            self.phase_delay = self.rng.uniform(0.65, 1.35)
+            self.command_label = "ASSESSING RESULT"
+
+    def _make_plan(self, app: Any) -> None:
+        sim = app.sim
+        candidates = sim.living_units(sim.player_side)
+        if not candidates:
+            return
+        def unit_utility(unit: Any) -> float:
+            enemy = sim.nearest_enemy(unit)
+            enemy_distance = distance((unit.x, unit.y), (enemy.x, enemy.y)) if enemy else MAP_WIDTH
+            stale = 1.2 if unit.order in ("Hold", "Destroyed") else 0.0
+            pressure = unit.suppression / 35 + (1.0 - unit.morale / 100)
+            mobility = 0.35 if unit.unit_type in ("Scout", "Armour") else 0.0
+            proximity = max(0.0, 1.0 - enemy_distance / 10)
+            return stale + pressure + mobility + proximity + self.rng.uniform(-0.25, 0.25)
+
+        unit = max(candidates, key=unit_utility)
+        state = sim.command_state_vector(unit) if hasattr(sim, "command_state_vector") else sim.state_vector(unit)
+        action_mask = [True, True, True, unit.morale < 68 or unit.suppression > 35, True]
+        action_index = self.brain.choose_action(state, explore=True, action_mask=action_mask)
+        action = ACTIONS[action_index]
