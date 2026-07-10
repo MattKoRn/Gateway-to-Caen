@@ -4,7 +4,7 @@ A dependency-free **Python/Tkinter tactical campaign** with procedural maps, per
 
 > This is an original clean-room project inspired by the broad tactical-command genre. It contains no proprietary Close Combat code, artwork, maps, audio, scenarios, or data and is not affiliated with the original publishers or developers.
 
-## Version 0.6.0 highlights
+## Version 0.6.1 highlights
 
 ### Persistent campaign
 
@@ -95,7 +95,7 @@ Terrain is generated as coherent road networks, field boundaries, village cluste
 - Smooth movement, obstacle steering, collision, formation separation, and blocked destination correction.
 - Physical walls, bunkers, roadblocks, anti-tank obstacles, craters, rubble, trees, and smoking wrecks.
 - Weapon cooldowns, line of sight, cover, armour, suppression, morale, casualties, objectives, weather, and animated combat effects.
-- Five-message non-combat tactical activity overlay plus full War Diary.
+- Full War Diary for battle and campaign events.
 - Silent battle autosaves every five seconds and neural-brain saves every ten seconds.
 - Manually dismissible offline report with days, hours, minutes, seconds, and rewards.
 - Atomic JSON persistence.
