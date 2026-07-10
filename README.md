@@ -1,127 +1,141 @@
 # Gateway to Caen: Tactical Command
 
-A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command interface, procedural battlefields, persistent neural commanders, side-aware fog of war, offline campaign progress, and a smooth action-following tactical camera.
+A dependency-free **Python/Tkinter tactical campaign** with procedural maps, persistent formations and resources, side-aware fog of war, packaged unit artwork and sound effects, a smart conventional enemy commander, and a neural virtual player that acts through a visible mouse cursor.
 
-> This is an original clean-room project inspired by the broad tactical-command genre. It does not contain proprietary Close Combat code, artwork, maps, audio, scenarios, or data, and it is not affiliated with the original game's publishers or developers.
+> This is an original clean-room project inspired by the broad tactical-command genre. It contains no proprietary Close Combat code, artwork, maps, audio, scenarios, or data and is not affiliated with the original publishers or developers.
 
-## Features
+## Version 0.6.0 highlights
 
-- Windows 95-inspired menus, toolbar, raised panels, status bar, main tabs, and sub-tabs.
-- New saves ask whether the player commands **Allied** or **Axis** forces.
-- Axis command mirrors the battlefield so the player's formations remain on the left.
-- Side-aware fog of war with persistent explored terrain and concealed enemy contacts.
-- Procedural 26×17 battlefields containing roads, fields, woods, hedgerows, villages, mud, and capturable objectives.
-- Rifle, support, scout, mortar, and armour formations with morale, ammunition, suppression, casualties, experience, and orders.
-- Smooth accelerated troop movement, turning, formation separation, physical unit collision, and roughly 30 FPS animation.
-- Procedural stone walls, bunkers, roadblocks, anti-tank barriers, wrecks, rubble, tree clusters, and craters.
-- Obstacle-aware steering, collision resolution, clear destination routing, and obstacle line-of-sight blocking.
-- Line of sight, weapon cooldowns, range falloff, terrain cover, objective capture, animated projectiles, explosions, smoke, and weather.
-- A tactical-map non-combat activity overlay that displays only the five newest messages.
-- A persistent `10 → 18 → 5` neural Q-network that decides every two simulated seconds and learns across maps and sessions.
-- Silent game autosaves every **5 seconds** and neural-brain saves every **10 seconds**.
-- Automatic procedural map replacement **10 seconds** after a battle concludes.
-- Offline progress with a manually dismissible command report showing days, hours, minutes, seconds, and persistent campaign rewards.
-- Atomic JSON writes to reduce save corruption risk.
-- Standard library only; no third-party Python packages are required.
+### Persistent campaign
 
-## Auto Camera
+- Every living formation retains its identity, personnel, ammunition, morale, experience, kills, and battle count across maps and sessions.
+- Allied and Axis manpower, supplies, and command points persist separately.
+- Destroyed formations remain lost; survivors redeploy on the next generated battlefield.
+- Campaign data is stored alongside the normal battle autosave and neural-brain file.
+- Automatic battle replacement still occurs ten seconds after a result.
 
-The tactical map includes a toggleable action camera that:
+### Neural requisition
 
-- prioritises selected units;
-- follows recent hits, weapon fire, shell impacts, advancing formations, and contested objectives;
-- smoothly scrolls between action areas instead of snapping;
-- dynamically zooms in for individual units and firefights;
-- zooms out to frame groups, objectives, and after-action overviews;
-- displays its current target and zoom level in a battlefield HUD;
-- remembers whether auto camera was enabled between sessions;
-- occasionally selects a friendly formation for several seconds so the full detail panel updates automatically.
+Before each map, the persistent neural network evaluates both faction rosters and resources, requisitions affordable formations, and immediately deducts their manpower, supply, and command-point costs. Its purchases and rationale appear in the new **Requisition** tab.
 
-Manual camera controls remain available:
+Formation classes are Rifle, Support, Scout, Mortar, and Armour. The tab includes:
 
-- **Mouse wheel:** zoom in or out and switch to manual camera.
-- **Middle-button drag:** pan and switch to manual camera.
-- **C:** toggle auto camera.
-- **F:** focus the selected unit or formation and enable auto camera.
-- **Double-click:** focus selected units.
-- **Focus / − / + / Overview:** toolbar camera controls.
+- both faction resource pools;
+- the complete persistent rosters;
+- unit costs;
+- recent neural purchases and rationale;
+- current adaptive difficulty and reward multipliers;
+- an optional button to queue additional neural purchases for the next map.
 
-## Tactical Activity Log
+### Visible neural mouse commander
 
-The lower-left battlefield overlay is reserved for non-combat activity and is permanently capped at **five messages**. It shows orders, selection changes, camera actions, objective captures, route adjustments, save/load notices, campaign notices, and map/system updates. Combat casualties remain in the full War Diary instead of flooding the tactical overlay.
+The player faction receives **no direct simulation auto-orders**. When enabled, the neural network instead behaves like a visible virtual player:
 
-## Obstacles and Collision
+1. It moves a custom neural cursor toward a friendly formation.
+2. It visibly left-clicks the unit.
+3. It chooses and clicks Hold, Advance, Flank, Retreat, or Assault.
+4. It moves to a battlefield destination.
+5. It right-clicks through the same tactical-map handler used by a human.
+6. It pauses to observe the result and trains from casualties, survival, score, and objective progress.
 
-Every procedural map now includes physical obstacles. Units steer around them, slide along their edges, avoid stacking with friendly and enemy formations, and cannot finish a movement order inside solid scenery. Orders placed on blocked ground are moved to the nearest safe endpoint. Bunkers, dense tree clusters, and large wrecks can also interrupt direct line of sight; destroyed armour leaves a smoking battlefield wreck that becomes a new collision obstacle.
+The cursor uses an expanded `18 → 32 → 5` Q-network with adaptive exploration, prioritised replay memory, gradient clipping, learning-rate decay, and legacy-brain migration. The auto-camera follows the cursor and dynamically zooms around its current action. Manual input pauses the virtual player for eight seconds.
 
-## Other Controls
+### Smart conventional enemy AI
 
-- **Left-click:** select a visible friendly unit.
-- **Shift + left-click:** add or remove units from the selection.
-- **Right-click:** issue a movement destination.
-- **Toolbar / Command tab:** set Hold, Advance, Defend, Assault, Flank, or Retreat.
-- **New Battle:** generate a new map while preserving side, brain, campaign profile, and camera preference.
-- **New Save / Choose Side:** replace the current battlefield save and choose Allied or Axis command.
-- **Player AI Commander:** let the persistent neural brain command the player's faction too.
+The opposing faction deliberately does **not** use the neural network. It uses a coordinated utility commander that:
+
+- assigns role-specific behaviour to infantry, support teams, scouts, mortars, and armour;
+- concentrates on valuable and contested objectives;
+- identifies weak visible contacts;
+- protects indirect-fire teams;
+- coordinates support weapons behind advancing infantry;
+- performs flanking reconnaissance and armoured breakthroughs;
+- retreats suppressed, depleted, or low-morale formations;
+- adjusts force quality and aggression to campaign difficulty.
+
+### Adaptive difficulty and rewards
+
+Recent player wins and losses move enemy difficulty between `0.65×` and `1.80×`. Enemy experience, morale, purchasing pressure, and tactical aggression respond to that value. Persistent campaign rewards move with the same performance curve, so stronger opposition produces greater returns while a losing streak softens both challenge and rewards.
+
+### Improved procedural maps
+
+Each map selects a different operational theme, such as:
+
+- Bocage Labyrinth
+- Village Crossroads
+- Wooded Ridge
+- Muddy Causeway
+- Open Farmland
+- Twin-Road Salient
+
+Terrain is generated as coherent road networks, field boundaries, village clusters, wooded ridges, muddy corridors, hedgerow lanes, deployment zones, obstacles, and capturable locations rather than unrelated random blobs. Every map rolls four unique mission objectives from capture, defence, reconnaissance, breakthrough, force-preservation, and anti-armour goals.
+
+### Graphics and sound
+
+- Packaged PNG artwork for every Allied and Axis formation class at three zoom levels.
+- A custom neural cursor image and mission icons.
+- Richer painted terrain, roads, forests, villages, mud, hedgerows, shadows, obstacles, selection reticles, direction indicators, status bars, destination markers, smoke, tracers, and explosions.
+- Generated WAV assets for UI clicks, selections, orders, requisitions, objectives, battle starts, gunfire, explosions, victory, defeat, and errors.
+- Windows uses asynchronous `winsound`; other platforms fall back safely to the Tk bell.
+- Audio can be disabled in **Options → Audio & Visual**.
+
+### Performance
+
+- Cached terrain and fog layers continue to transform with the camera instead of being rebuilt each frame.
+- Spatial hashes accelerate nearby-unit, collision, target, and obstacle searches as persistent rosters grow.
+- Unit sprites are loaded lazily and cached by side, class, and zoom tier.
+- Combat effects and sounds are throttled and capped.
+- Off-screen formation artwork is skipped.
+
+## Existing systems
+
+- Windows-inspired menus, toolbar, raised panels, status bar, tabs, and subtabs.
+- Allied or Axis player-side selection with mirrored Axis presentation.
+- Persistent fog of war and explored terrain.
+- Smooth movement, obstacle steering, collision, formation separation, and blocked destination correction.
+- Physical walls, bunkers, roadblocks, anti-tank obstacles, craters, rubble, trees, and smoking wrecks.
+- Weapon cooldowns, line of sight, cover, armour, suppression, morale, casualties, objectives, weather, and animated combat effects.
+- Five-message non-combat tactical activity overlay plus full War Diary.
+- Silent battle autosaves every five seconds and neural-brain saves every ten seconds.
+- Manually dismissible offline report with days, hours, minutes, seconds, and rewards.
+- Atomic JSON persistence.
+- Standard-library runtime only.
+
+## Controls
+
+| Control | Action |
+|---|---|
+| `N` | Toggle neural mouse commander |
+| `C` | Toggle auto-camera |
+| `F` | Focus selected formation |
+| Mouse wheel | Manual zoom |
+| Middle-button drag | Manual camera pan |
+| Left-click | Manual friendly selection |
+| Shift + left-click | Manual multi-selection |
+| Right-click | Manual movement destination |
+| Toolbar / Command tab | Manual order selection |
+
+Manual interaction temporarily yields control from the neural cursor.
 
 ## Run on Windows
 
-1. Install Python 3 and keep Tcl/Tk enabled during installation.
+1. Install Python 3 with Tcl/Tk enabled.
 2. Double-click `run_game.bat`.
 
 Or run:
 
-```powershell
-py -3 main.py
+```bash
+python main.py
 ```
 
-## Persistent Data
+No third-party runtime packages are required.
 
-On Windows, files are stored in:
+## Save locations
 
-```text
-%APPDATA%\GatewayToCaen\
-```
+On Windows, files are stored under `%APPDATA%\GatewayToCaen`:
 
-- `autosave.json` — battle state, chosen side, fog exploration, and post-battle countdown.
-- `tactical_brain.json` — neural weights and lifetime learning statistics.
-- `settings.json` — simulation speed, preferred side, and auto-camera toggle.
-- `campaign_profile.json` — last active timestamp, offline rewards, campaign reserves, sessions, and pending report.
-
-Starting a new battle or save preserves the neural brain and campaign reserves. Closing performs a final game, brain, profile, and settings save.
-
-## Offline Rewards
-
-Reward rates are deterministic and capped at 30 rewarded days per claim:
-
-- 1 Command Point per minute.
-- 1 Supply per 10 seconds.
-- 1 Reinforcement Token per 30 minutes.
-- 1 Intelligence Report per hour.
-
-The report remains pending until manually dismissed and reappears after a crash without granting the same offline interval twice.
-
-## Tests
-
-```powershell
-py -3 -m unittest discover -s tests -v
-```
-
-The suite covers neural persistence, procedural battles, side-restricted orders, continuous movement, obstacle generation and persistence, collision avoidance, blocked destinations, obstacle line of sight, fog spotting, save restoration, automatic map rotation, offline rewards and report persistence, camera target priority, automatic friendly detail selection, five-message log filtering, dynamic zoom, map-edge clamping, and after-action overview behaviour.
-
-## Project Layout
-
-```text
-main.py                            Application entry point
-run_game.bat                       Windows launcher
-gateway_to_caen/ui.py              Base Windows 95 Tkinter interface
-gateway_to_caen/enhanced_ui.py     Offline progress, tactical log, campaign UI, and v0.5 shell
-gateway_to_caen/camera.py          Auto-camera, friendly detail selection, viewport transforms, and five-line log
-gateway_to_caen/terrain_graphics.py Cached terrain, obstacles, fog, and objectives
-gateway_to_caen/unit_graphics.py   Units, combat effects, and weather
-gateway_to_caen/simulation.py      Tactical simulation, collisions, obstacles, and battle state
-gateway_to_caen/neural.py          Persistent neural Q-network
-gateway_to_caen/offline.py         Offline rewards and campaign profile
-gateway_to_caen/persistence.py     Atomic JSON persistence
-tests/                             Neural, simulation, obstacle, offline, camera, and log tests
-```
+- `autosave.json` — current battlefield
+- `campaign_state.json` — persistent rosters, resources, difficulty, objectives, and requisitions
+- `tactical_brain.json` — neural cursor and requisition learning
+- `campaign_profile.json` — offline progress rewards
+- `settings.json` — speed, side, audio, camera, and neural-cursor preferences
