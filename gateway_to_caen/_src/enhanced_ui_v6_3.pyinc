@@ -1,0 +1,98 @@
+        super()._refresh_loop()
+        self._campaign()
+        self._refresh_campaign_panels()
+        self.sound_manager.consume_events(self.sim.events)
+        if self.sim.battle_over and not self._last_battle_over:
+            self.sound_manager.play("victory" if self.sim.winner == self.sim.player_side else "defeat", force=True)
+        self._last_battle_over = self.sim.battle_over
+
+    def _header(self) -> None:
+        super()._header()
+        resources = self.sim.campaign.resources[self.sim.player_side]
+        self.wallet_label.configure(text=f"MP {resources.manpower:,} | SUP {resources.supplies:,} | CP {resources.command_points:,}")
+        self.difficulty_label.configure(text=f"DIFF {self.sim.difficulty:.2f}×")
+        if hasattr(self, "neural_cursor"):
+            self.cursor_status.configure(text=f"Neural mouse: {self.neural_cursor.command_label[:20]}")
+        self.reward_status.configure(text=f"Reward scale: {self.sim.reward_multiplier:.2f}×")
+
+    def _sync_side(self) -> None:
+        side = self.sim.player_side
+        self.ai_var.set(bool(self.sim.player_ai_enabled))
+        self.title_label.configure(text=f"▣  GATEWAY TO CAEN — {side.upper()} CAMPAIGN COMMAND")
+        self.ai_check.configure(text="Neural Mouse Commander")
+        self.order_help.configure(text=f"The {side} side is controlled by the visible neural mouse when enabled. It selects formations and issues orders through the same tactical-map UI actions as a person. The enemy uses a separate conventional utility AI. Manual input pauses the neural cursor briefly.")
+        self.side_info.configure(text=f"Player faction: {side}\nEnemy faction: {self.sim.enemy_side}\nPlayer control: visible neural cursor only — no direct simulation auto-orders\nEnemy control: coordinated conventional AI\nDifficulty: {getattr(self.sim, 'difficulty', 1.0):.2f}×")
+
+    def _refresh_campaign_panels(self) -> None:
+        if not hasattr(self, "req_summary"):
+            return
+        campaign = self.sim.campaign
+        lines = ["PERSISTENT CAMPAIGN RESOURCES", "=" * 48]
+        for side in SIDES:
+            resources = campaign.resources[side]
+            lines.append(f"{side:<7} MP {resources.manpower:4d}   SUP {resources.supplies:5d}   CP {resources.command_points:4d}   Roster {len(campaign.rosters[side]):2d}")
+        lines.extend(("", f"Adaptive enemy difficulty: {campaign.difficulty:.2f}×", f"Scaled battle rewards:     {campaign.reward_multiplier:.2f}×", f"Recent player record:      {''.join('W' if result else 'L' for result in campaign.recent_player_results) or 'No completed battles'}", "", "All living formations retain personnel, ammunition, morale, experience, kills, and identity between maps and sessions."))
+        self._text(self.req_summary, "\n".join(lines))
+        self.req_scale.configure(text=f"Battle {campaign.battle_index}  •  {self.sim.map_theme}  •  {campaign.difficulty:.2f}×")
+        self.req_history.delete(*self.req_history.get_children())
+        for index, record in enumerate(campaign.requisition_history[-18:]):
+            cost = record.costs
+            self.req_history.insert("", "end", iid=f"req-{index}", values=(record.side, record.unit_type, f"{cost['manpower']} MP / {cost['supplies']} SUP / {cost['command_points']} CP", record.reason))
+        self.req_rosters.delete(*self.req_rosters.get_children())
+        for side in SIDES:
+            for unit in campaign.rosters[side]:
+                self.req_rosters.insert("", "end", iid=f"roster-{unit.uid}", text=unit.name, values=(side, unit.unit_type, f"{unit.men}/{unit.max_men}", f"{unit.experience:.2f}"))
+
+    def _manual_requisition(self) -> None:
+        records = self.sim.campaign.requisition_for_battle(self.brain, self.sim.seed ^ int(time.time()), max_per_side=2)
+        self.sim.save_campaign()
+        if records:
+            self.sound_manager.play("requisition", force=True)
+            self._record_tactical("Requisition", f"Neural quartermaster queued {len(records)} formation(s) for the next map.")
+            self.status.configure(text=f"Neural requisition committed {len(records)} formation(s); costs deducted immediately.")
+        else:
+            self.sound_manager.play("error")
+            self.status.configure(text="No affordable or necessary requisitions were found.")
+        self._refresh_campaign_panels()
+
+    def _brain(self) -> None:
+        stats = self.brain.stats
+        total = stats.wins + stats.losses
+        win_rate = stats.wins / total * 100 if total else 0.0
+        cursor = getattr(self, "neural_cursor", None)
+        text = (
+            f"NEURAL VIRTUAL PLAYER\n{'=' * 52}\n"
+            f"Architecture:       {self.brain.input_size}-{self.brain.hidden_size}-{self.brain.output_size}\n"
+            f"Learning rate:      {self.brain.learning_rate:.5f}\n"
+            f"Exploration rate:   {self.brain.epsilon:.4f}\n"
+            f"Replay memory:      {len(self.brain.replay_memory):,}/{self.brain.replay_limit:,}\n"
+            f"Decisions:          {stats.decisions:,}\n"
+            f"Training steps:     {stats.training_steps:,}\n"
+            f"Replay steps:       {stats.replay_steps:,}\n"
+            f"Lifetime reward:    {stats.lifetime_reward:+.3f}\n"
+            f"Player wins/losses: {stats.wins}/{stats.losses} ({win_rate:.1f}%)\n"
+            f"Cursor action:      {cursor.last_decision if cursor else 'Starting'}\n"
+            f"Cursor train error: {cursor.last_training_error if cursor else 0.0:.5f}\n"
+            f"Enemy commander:    Conventional utility AI\n"
+            f"Enemy plan:         {getattr(self.sim.enemy_ai, 'last_plan', 'Assessing')}\n"
+            f"Brain file:         {self.brain_path}"
+        )
+        self._text(self.brain_status, text)
+        self.decisions.delete(*self.decisions.get_children())
+        for index, action in enumerate(ACTIONS):
+            self.decisions.insert("", "end", text=action.title(), values=(f"{self.brain.last_q_values[index]:+.5f}", f"{stats.action_counts.get(action, 0):,}"))
+        self._text(self.training, "The neural network observes eighteen campaign and tactical signals, uses adaptive exploration, stores prioritised replay experiences, and learns only from visible cursor actions. It also requisitions formations for both factions before deployment. Enemy battlefield control is deliberately non-neural and uses coordinated utility planning.")
+        self.brain_label.configure(text=f"Brain: {stats.training_steps:,} + {stats.replay_steps:,} replay")
+
+    def _overview(self) -> None:
+        super()._overview()
+        base = self.overview.get("1.0", "end").rstrip()
+        objectives = "\n".join(f"  [{'✓' if item.get('completed') else ' '}] {item.get('title')} — {item.get('description')}" for item in self.sim.rolled_objectives)
+        extra = f"\n\nCAMPAIGN MAP ROLL\n{'-' * 60}\nTheme:       {self.sim.map_theme}\nDifficulty:  {self.sim.difficulty:.2f}×\nRewards:     {self.sim.reward_multiplier:.2f}×\nEnemy plan:  {self.sim.enemy_ai.last_plan}\n\nUNIQUE OBJECTIVES\n{'-' * 60}\n{objectives}"
+        self._text(self.overview, base + extra)
+
+    def _persistence(self) -> None:
+        self.persist.configure(text=f"Battle autosave: every 5 seconds\nNeural brain save: every 10 seconds\nCampaign roster/resources: every save and map transition\nOffline timestamp: every game save\nMap rotation: 10 seconds after battle end\nAuto camera: {'Enabled' if self.camera.enabled else 'Manual'}\nNeural mouse: {'Enabled' if getattr(self, 'neural_cursor', None) and self.neural_cursor.enabled else 'Disabled'}\nSound: {'Enabled' if self.sound_manager.enabled else 'Disabled'}\nPlayer side: {self.sim.player_side}\n\nBattle: {self.save_path}\nBrain: {self.brain_path}\nPersistent campaign: {self.sim.campaign_path}")
+
+    def _campaign(self) -> None:
+        pending = "Yes — open the report to dismiss it" if self.profile.pending_report else "No"
