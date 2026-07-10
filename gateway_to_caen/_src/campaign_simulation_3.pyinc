@@ -1,0 +1,146 @@
+    def _update_objective_completion(self, winner: str | None = None) -> None:
+        point_lookup = {point.name: point for point in self.control_points}
+        for objective in self.rolled_objectives:
+            kind = objective.get("kind")
+            point = point_lookup.get(objective.get("point_name"))
+            completed = False
+            if kind in ("capture", "hold") and point:
+                completed = point.owner == self.player_side
+            elif kind == "recon" and point:
+                completed = any(distance((unit.x, unit.y), (point.x, point.y)) <= 3.5 for unit in self.living_units(self.player_side) if unit.unit_type == "Scout")
+            elif kind == "breakthrough":
+                completed = any((unit.x > MAP_WIDTH * 0.62 if self.player_side == "Allied" else unit.x < MAP_WIDTH * 0.38) for unit in self.living_units(self.player_side))
+            elif kind == "preserve":
+                completed = any(unit.unit_type == "Armour" for unit in self.living_units(self.player_side))
+            elif kind == "destroy_armour":
+                completed = not any(unit.unit_type == "Armour" for unit in self.living_units(self.enemy_side))
+            objective["completed"] = bool(completed)
+
+    def _update_control_points(self, dt: float) -> None:
+        super()._update_control_points(dt)
+        self._update_objective_completion()
+
+    # ---- Spatial acceleration -------------------------------------------------
+    def _rebuild_spatial_indexes(self) -> None:
+        self._obstacle_index.rebuild(self.obstacles, lambda obstacle: (obstacle.x, obstacle.y))
+        self._unit_index.rebuild(self.living_units(), lambda unit: (unit.x, unit.y))
+        self._indexed_obstacle_count = len(self.obstacles)
+
+    def tick(self, dt: float) -> None:
+        super().tick(dt)
+        # Wrecks can be created underneath a nearby survivor during combat.
+        # Resolve normally first, then use the nearest legal point only for any
+        # tiny overlap that remains after movement and formation separation.
+        for unit in self.living_units():
+            unit.x, unit.y = self._resolve_obstacle_collisions(unit, unit.x, unit.y)
+            if self.colliding_obstacle(unit.x, unit.y, self.unit_collision_radius(unit)) is not None:
+                unit.x, unit.y = self.nearest_clear_position(unit.x, unit.y, self.unit_collision_radius(unit))
+        self._unit_index.rebuild(self.living_units(), lambda item: (item.x, item.y))
+
+    def _move_units(self, dt: float) -> None:
+        super()._move_units(dt)
+        self._unit_index.rebuild(self.living_units(), lambda unit: (unit.x, unit.y))
+
+    def _resolve_combat(self, dt: float) -> None:
+        before = len(self.obstacles)
+        super()._resolve_combat(dt)
+        if len(self.obstacles) != before:
+            self._obstacle_index.rebuild(self.obstacles, lambda obstacle: (obstacle.x, obstacle.y))
+            self._indexed_obstacle_count = len(self.obstacles)
+
+    def colliding_obstacle(self, x: float, y: float, radius: float, movement_only: bool = True) -> Obstacle | None:
+        if not hasattr(self, "_obstacle_index") or self._indexed_obstacle_count != len(self.obstacles):
+            return super().colliding_obstacle(x, y, radius, movement_only)
+        candidates = [
+            obstacle
+            for obstacle in self._obstacle_index.nearby(x, y, radius + 2.0)
+            if (obstacle.blocks_movement or not movement_only) and self.obstacle_distance(x, y, obstacle) < obstacle.radius + radius
+        ]
+        return min(candidates, key=lambda obstacle: self.obstacle_distance(x, y, obstacle), default=None)
+
+    def nearest_enemy(self, unit: Unit) -> Unit | None:
+        if not hasattr(self, "_unit_index"):
+            return super().nearest_enemy(unit)
+        enemy_side = opposite_side(unit.side)
+        for radius in (3.0, 6.0, 10.0, 18.0, 32.0):
+            candidates = [other for other in self._unit_index.nearby(unit.x, unit.y, radius) if other.alive and other.side == enemy_side]
+            if candidates:
+                return min(candidates, key=lambda enemy: distance((unit.x, unit.y), (enemy.x, enemy.y)))
+        return None
+
+    def _select_target(self, attacker: Unit, profile: dict[str, float]) -> Unit | None:
+        enemy_side = opposite_side(attacker.side)
+        nearby = self._unit_index.nearby(attacker.x, attacker.y, profile["range"] + 1.0)
+        candidates: list[tuple[float, Unit]] = []
+        for target in nearby:
+            if not target.alive or target.side != enemy_side:
+                continue
+            dist = distance((attacker.x, attacker.y), (target.x, target.y))
+            if dist < profile["min_range"] or dist > profile["range"]:
+                continue
+            if attacker.unit_type != "Mortar" and not self.line_of_sight(attacker, target):
+                continue
+            cover = TERRAIN_COVER.get(self.tile_at(target.x, target.y), 0.0)
+            vulnerability = (1.0 - target.strength) * 1.4 + target.suppression / 85.0 + (1.0 - target.morale / 100.0)
+            priority = dist + cover * 1.6 - vulnerability
+            if target.unit_type == "Armour" and attacker.unit_type in ("Armour", "Mortar"):
+                priority -= 0.8
+            candidates.append((priority, target))
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+    def _separate_units(self, dt: float) -> None:
+        living = self.living_units()
+        self._unit_index.rebuild(living, lambda unit: (unit.x, unit.y))
+        handled: set[tuple[str, str]] = set()
+        for first in living:
+            for second in self._unit_index.nearby(first.x, first.y, 1.2):
+                if first.uid == second.uid:
+                    continue
+                pair = tuple(sorted((first.uid, second.uid)))
+                if pair in handled:
+                    continue
+                handled.add(pair)
+                dx, dy = first.x - second.x, first.y - second.y
+                dist = math.hypot(dx, dy)
+                minimum = self.unit_collision_radius(first) + self.unit_collision_radius(second)
+                if dist >= minimum:
+                    continue
+                if dist <= 0.001:
+                    angle = ((hash(first.uid) ^ hash(second.uid)) & 255) / 255 * math.tau
+                    nx, ny = math.cos(angle), math.sin(angle)
+                else:
+                    nx, ny = dx / dist, dy / dist
+                push = (minimum - max(dist, 0.001)) * 0.52 * min(1.0, dt * 12.0)
+                first.x, first.y = self._resolve_obstacle_collisions(first, clamp(first.x + nx * push, 0, MAP_WIDTH - 1), clamp(first.y + ny * push, 0, MAP_HEIGHT - 1))
+                second.x, second.y = self._resolve_obstacle_collisions(second, clamp(second.x - nx * push, 0, MAP_WIDTH - 1), clamp(second.y - ny * push, 0, MAP_HEIGHT - 1))
+
+    def to_dict(self) -> dict[str, Any]:
+        self.sync_live_rosters()
+        payload = super().to_dict()
+        payload.update(
+            {
+                "version": self.SAVE_VERSION,
+                "campaign_state": self.campaign.to_dict(),
+                "map_theme": self.map_theme,
+                "rolled_objectives": self.rolled_objectives,
+                "requisition_report": [record.__dict__ for record in self.requisition_report],
+                "difficulty": self.difficulty,
+                "reward_multiplier": self.reward_multiplier,
+                "enemy_ai_plan": self.enemy_ai.last_plan,
+            }
+        )
+        self.save_campaign()
+        return payload
+
+    def load_dict(self, data: dict[str, Any]) -> None:
+        campaign_data = data.get("campaign_state")
+        if isinstance(campaign_data, dict):
+            self.campaign = CampaignState.from_dict(campaign_data)
+            self.campaign.attach_brain(self.brain)
+        self.map_theme = str(data.get("map_theme", self.map_theme))
+        self.rolled_objectives = data.get("rolled_objectives", []) if isinstance(data.get("rolled_objectives"), list) else []
+        super().load_dict(data)
+        self.enemy_ai.reset(self.seed)
+        self._rebuild_spatial_indexes()
+        self.sync_live_rosters()
+        self.save_campaign()
