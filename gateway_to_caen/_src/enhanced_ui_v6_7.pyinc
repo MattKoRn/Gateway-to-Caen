@@ -1,0 +1,27 @@
+"""Version 0.6.2 controls and about text."""
+
+
+def _controls_v062(self) -> None:
+    messagebox.showinfo(
+        "Controls",
+        "The neural mouse can operate the battlefield, every main tab, notebook subtabs, "
+        "safe buttons, checkboxes, trees, text panels, and comboboxes.\n\n"
+        "N: toggle neural mouse\nC: toggle auto camera\nF: focus selection\n"
+        "Mouse wheel: zoom\nMiddle-drag: pan\nLeft-click: manual selection or tab/control use\n"
+        "Right-click: manual destination\n\nAny human click or keypress pauses and hides the neural pointer for twelve seconds.",
+        parent=self.root,
+    )
+
+
+def _about_v062(self) -> None:
+    messagebox.showinfo(
+        "About",
+        "Gateway to Caen: Tactical Command\nVersion 0.6.2\n\n"
+        "Responsive tab rendering, full neural UI navigation, persistent armies, "
+        "adaptive conventional enemy AI, runtime-generated artwork, and sound effects.",
+        parent=self.root,
+    )
+
+
+TacticalCommandApp.controls = _controls_v062
+TacticalCommandApp.about = _about_v062
