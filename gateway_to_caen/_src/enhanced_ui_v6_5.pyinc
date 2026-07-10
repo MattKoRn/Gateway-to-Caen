@@ -1,0 +1,15 @@
+"""Version 0.6.1 presentation updates."""
+
+
+def _about_v061(self) -> None:
+    messagebox.showinfo(
+        "About",
+        "Gateway to Caen: Tactical Command\nVersion 0.6.1\n\n"
+        "Original clean-room tactical campaign featuring persistent armies, "
+        "adaptive conventional enemy AI, a visible neural virtual player, "
+        "runtime-generated artwork, and sound effects.",
+        parent=self.root,
+    )
+
+
+TacticalCommandApp.about = _about_v061
