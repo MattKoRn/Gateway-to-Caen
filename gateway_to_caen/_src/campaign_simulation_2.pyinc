@@ -1,0 +1,153 @@
+        elif self.map_theme == "Wooded Ridge":
+            road_curve(MAP_HEIGHT * 0.62, 1.8, 0.8)
+            for x in range(4, MAP_WIDTH - 3):
+                ridge_y = int(MAP_HEIGHT * 0.34 + math.sin(x / 3.5) * 1.5)
+                paint_circle(x, ridge_y, 1.6, "woods", 0.3)
+            for _ in range(5):
+                paint_circle(rng.randrange(4, MAP_WIDTH - 4), rng.randrange(2, MAP_HEIGHT - 2), rng.uniform(1.2, 2.6), rng.choice(("woods", "mud", "village")))
+        elif self.map_theme == "Muddy Causeway":
+            for y in range(4, MAP_HEIGHT - 3):
+                for x in range(4, MAP_WIDTH - 4):
+                    if abs(y - MAP_HEIGHT / 2) < 4.4 + math.sin(x / 5.0):
+                        grid[y][x] = "mud"
+            road_curve(MAP_HEIGHT / 2, 0.9)
+            for _ in range(7):
+                paint_circle(rng.randrange(4, MAP_WIDTH - 4), rng.randrange(2, MAP_HEIGHT - 2), rng.uniform(0.8, 1.8), rng.choice(("woods", "hedge", "village")))
+        elif self.map_theme == "Twin-Road Salient":
+            road_curve(5.0, 1.0, 0.2)
+            road_curve(12.0, 1.2, 1.4)
+            for _ in range(10):
+                paint_circle(rng.randrange(3, MAP_WIDTH - 3), rng.randrange(1, MAP_HEIGHT - 1), rng.uniform(1.0, 2.1), rng.choice(("woods", "hedge", "village", "mud")))
+        else:
+            road_curve(MAP_HEIGHT / 2, 1.0)
+            for y in (4, 8, 12):
+                for x in range(4, MAP_WIDTH - 4):
+                    if rng.random() < 0.77 and grid[y][x] == "open":
+                        grid[y][x] = "hedge"
+            for _ in range(8):
+                paint_circle(rng.randrange(4, MAP_WIDTH - 4), rng.randrange(2, MAP_HEIGHT - 2), rng.uniform(1.0, 2.2), rng.choice(("woods", "village", "mud")))
+
+        # Keep deployment corridors readable and collision-safe.
+        for y in range(MAP_HEIGHT):
+            for x in range(4):
+                if grid[y][x] != "road":
+                    grid[y][x] = "open" if (x + y) % 4 else "hedge"
+            for x in range(MAP_WIDTH - 4, MAP_WIDTH):
+                if grid[y][x] != "road":
+                    grid[y][x] = "open" if (x + y) % 4 else "hedge"
+        return grid
+
+    def _generate_control_points(self) -> list[ControlPoint]:
+        rng = self._map_rng
+        positions = [
+            (MAP_WIDTH // 2, MAP_HEIGHT // 2),
+            (MAP_WIDTH // 2 - 5, rng.choice((3, 4, 5))),
+            (MAP_WIDTH // 2 + 5, rng.choice((MAP_HEIGHT - 6, MAP_HEIGHT - 5, MAP_HEIGHT - 4))),
+            (MAP_WIDTH // 2 + rng.choice((-3, 3)), rng.choice((4, MAP_HEIGHT - 5))),
+        ]
+        names_by_theme = {
+            "Bocage Labyrinth": ("Sunken Lane", "Cider Farm", "Hedgerow Gap", "Old Orchard"),
+            "Village Crossroads": ("Market Square", "Church Road", "Rail House", "South Quarter"),
+            "Wooded Ridge": ("Ridge 112", "Forester's Lodge", "North Spur", "Timber Track"),
+            "Muddy Causeway": ("Stone Causeway", "Drainage Farm", "Mud Junction", "Dry Knoll"),
+            "Open Farmland": ("Wheat Crossroads", "Windmill", "Dairy Farm", "East Field"),
+            "Twin-Road Salient": ("Central Salient", "Upper Road", "Lower Road", "Relay Farm"),
+        }
+        names = names_by_theme[self.map_theme]
+        points = [ControlPoint(names[index], int(x), int(y), 100 + index * 25) for index, (x, y) in enumerate(positions)]
+        templates = rng.sample(list(OBJECTIVE_TEMPLATES), k=4)
+        self.rolled_objectives = []
+        for index, (kind, title, description) in enumerate(templates):
+            point = points[index % len(points)]
+            self.rolled_objectives.append(
+                {
+                    "id": f"obj-{self.campaign.battle_index + 1:03d}-{index}",
+                    "kind": kind,
+                    "title": title.format(point=point.name),
+                    "description": description.format(point=point.name),
+                    "point_name": point.name,
+                    "reward": 40 + index * 15,
+                    "completed": False,
+                }
+            )
+        return points
+
+    def _generate_units(self) -> list[Unit]:
+        units: list[Unit] = []
+        for side in SIDES:
+            roster = self.campaign.rosters[side][:24]
+            count = len(roster)
+            columns = 2 if count <= 14 else 3
+            for index, saved in enumerate(roster):
+                column = index % columns
+                row = index // columns
+                spacing = max(0.75, (MAP_HEIGHT - 2.0) / max(1, math.ceil(count / columns)))
+                y = clamp(1.0 + row * spacing + column * 0.35, 0.8, MAP_HEIGHT - 1.0)
+                x = 1.25 + column * 1.05 if side == "Allied" else MAP_WIDTH - 2.25 - column * 1.05
+                x, y = self.nearest_clear_position(x, y, 0.31 if saved.unit_type == "Armour" else 0.23)
+                units.append(
+                    Unit(
+                        uid=saved.uid,
+                        side=side,
+                        name=saved.name,
+                        unit_type=saved.unit_type,
+                        x=x,
+                        y=y,
+                        men=saved.men,
+                        max_men=saved.max_men,
+                        morale=saved.morale,
+                        ammo=saved.ammo,
+                        experience=saved.experience,
+                        kills=saved.kills,
+                        ai_controlled=side != self.player_side,
+                        heading=0.0 if side == "Allied" else math.pi,
+                    )
+                )
+        return units
+
+    def _apply_adaptive_force_quality(self) -> None:
+        for unit in self.living_units(self.enemy_side):
+            unit.experience = clamp(unit.experience + (self.difficulty - 1.0) * 0.16, 0.18, 0.96)
+            unit.morale = clamp(unit.morale + (self.difficulty - 1.0) * 9.0, 35.0, 100.0)
+            unit.ammo = clamp(unit.ammo + (self.difficulty - 1.0) * 6.0, 15.0, 100.0)
+
+    def _ai_decision_cycle(self) -> None:
+        # The enemy uses a coordinated conventional utility AI. The player's
+        # side receives no direct simulation commands; its neural commander acts
+        # only through the visible cursor/controller in the UI.
+        self.enemy_ai.command_cycle(self, self.enemy_side, self.difficulty)
+
+    def command_state_vector(self, unit: Unit) -> list[float]:
+        base = list(super().state_vector(unit))
+        own_men = sum(other.men for other in self.living_units(unit.side))
+        enemy_men = sum(other.men for other in self.living_units(opposite_side(unit.side)))
+        own_points = sum(point.value for point in self.control_points if point.owner == unit.side)
+        enemy_points = sum(point.value for point in self.control_points if point.owner == opposite_side(unit.side))
+        resources = self.campaign.resources[unit.side]
+        extra = [
+            clamp((own_men - enemy_men) / 80.0, -1.0, 1.0),
+            clamp((own_points - enemy_points) / 300.0, -1.0, 1.0),
+            clamp(self.elapsed / 600.0 - 1.0, -1.0, 1.0),
+            clamp(self.difficulty - 1.0, -1.0, 1.0),
+            clamp(resources.manpower / 220.0 - 1.0, -1.0, 1.0),
+            clamp(resources.supplies / 900.0 - 1.0, -1.0, 1.0),
+            clamp(resources.command_points / 130.0 - 1.0, -1.0, 1.0),
+            1.0 if unit.unit_type in ("Scout", "Armour") else -0.3,
+        ]
+        return (base + extra)[:18]
+
+    def _conclude_battle(self, winner: str, reason: str) -> None:
+        if self.battle_over:
+            return
+        self.battle_over = True
+        self.winner = winner
+        self.post_battle_elapsed = 0.0
+        self.log("Command", f"{reason}. {winner} victory. A new map will begin in 10 seconds.")
+        self.brain.mark_result(winner == self.player_side)
+        self.sync_live_rosters()
+        objective_value = sum(point.value for point in self.control_points if point.owner == self.player_side)
+        self._update_objective_completion(winner)
+        self.campaign.settle_battle(winner, self.player_side, objective_value)
+        self._settled_battle_seed = self.seed
+        self.save_campaign()
+
