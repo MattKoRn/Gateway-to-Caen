@@ -1,6 +1,6 @@
 # Gateway to Caen: Tactical Command
 
-A dependency-free **Python/Tkinter tactical campaign** with procedural maps, persistent formations and resources, side-aware fog of war, packaged unit artwork and sound effects, a smart conventional enemy commander, and a neural virtual player that acts through a visible mouse cursor.
+A dependency-free **Python/Tkinter tactical campaign** with procedural maps, persistent formations and resources, side-aware fog of war, runtime-generated and cached unit artwork and sound effects, a smart conventional enemy commander, and a neural virtual player that acts through a visible mouse cursor.
 
 > This is an original clean-room project inspired by the broad tactical-command genre. It contains no proprietary Close Combat code, artwork, maps, audio, scenarios, or data and is not affiliated with the original publishers or developers.
 
@@ -72,10 +72,10 @@ Terrain is generated as coherent road networks, field boundaries, village cluste
 
 ### Graphics and sound
 
-- Packaged PNG artwork for every Allied and Axis formation class at three zoom levels.
+- Runtime-generated PNG artwork for every Allied and Axis formation class at three zoom levels.
 - A custom neural cursor image and mission icons.
 - Richer painted terrain, roads, forests, villages, mud, hedgerows, shadows, obstacles, selection reticles, direction indicators, status bars, destination markers, smoke, tracers, and explosions.
-- Generated WAV assets for UI clicks, selections, orders, requisitions, objectives, battle starts, gunfire, explosions, victory, defeat, and errors.
+- Runtime-generated WAV assets for UI clicks, selections, orders, requisitions, objectives, battle starts, gunfire, explosions, victory, defeat, and errors.
 - Windows uses asynchronous `winsound`; other platforms fall back safely to the Tk bell.
 - Audio can be disabled in **Options → Audio & Visual**.
 
