@@ -1,0 +1,11 @@
+"""Version 0.6.2 manual-priority extension."""
+
+_PREVIOUS_CURSOR_MANUAL_V062 = NeuralCursorController.notify_manual_activity
+
+
+def _cursor_manual_priority_v062(self) -> None:
+    _PREVIOUS_CURSOR_MANUAL_V062(self)
+    self.manual_pause_until = max(self.manual_pause_until, time.perf_counter() + 12.0)
+
+
+NeuralCursorController.notify_manual_activity = _cursor_manual_priority_v062
