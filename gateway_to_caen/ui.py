@@ -1,6 +1,7 @@
-"""Windows 95 inspired Tkinter interface for Gateway to Caen: Tactical Command."""
+"""Windows 95 styled, side-aware Tkinter command interface."""
 from __future__ import annotations
 
+import math
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -9,13 +10,13 @@ from .neural import ACTIONS, TacticalBrain
 from .persistence import atomic_write_json, read_json, user_data_dir
 from .simulation import MAP_HEIGHT, MAP_WIDTH, TERRAIN_COVER, BattleSimulation, clamp, distance
 
-WIN95 = {"face": "#c0c0c0", "light": "#ffffff", "shadow": "#808080", "dark": "#000000", "navy": "#000080", "allied": "#244d9b", "axis": "#9a2828", "neutral": "#666666"}
-TERRAIN_COLORS = {"open": "#83965d", "road": "#b5aa85", "woods": "#3e663b", "hedge": "#58733e", "village": "#8a7667", "mud": "#74684d"}
+W95 = {"face":"#c0c0c0","navy":"#000080","light":"#ffffff","shadow":"#808080","dark":"#000000","allied":"#244d9b","axis":"#9a2828","neutral":"#666666"}
+TERRAIN = {"open":"#80965a","road":"#b8ad8c","woods":"#365f35","hedge":"#56703c","village":"#887364","mud":"#71654a"}
 
 
 class TacticalCommandApp:
-    TICK_MS = 100
-    REFRESH_MS = 350
+    TICK_MS = DRAW_MS = 33
+    REFRESH_MS = 250
     GAME_SAVE_MS = 5_000
     BRAIN_SAVE_MS = 10_000
 
@@ -24,586 +25,464 @@ class TacticalCommandApp:
         root.title("Gateway to Caen: Tactical Command")
         root.geometry("1280x820")
         root.minsize(1040, 690)
-        root.configure(bg=WIN95["face"])
+        root.configure(bg=W95["face"])
         self.data_dir = user_data_dir()
         self.brain_path = self.data_dir / "tactical_brain.json"
         self.save_path = self.data_dir / "autosave.json"
         self.settings_path = self.data_dir / "settings.json"
-        self.brain = TacticalBrain.load_or_create(self.brain_path)
-        self.sim = BattleSimulation(self.brain)
         self.settings = read_json(self.settings_path, {})
+        self.brain = TacticalBrain.load_or_create(self.brain_path)
+        self._style()
+        side = str(self.settings.get("player_side", "Allied"))
+        side = side if side in ("Allied", "Axis") else "Allied"
+        if not self.save_path.exists():
+            side = self._choose_side(side)
+        self.sim = BattleSimulation(self.brain, player_side=side)
         self.speed = float(self.settings.get("speed", 1.0))
-        self.paused = False
-        self.running = True
-        self.selected_ids: set[str] = set()
-        self.hover_tile: tuple[int, int] | None = None
+        self.running, self.paused = True, False
+        self.selected: set[str] = set()
+        self.hover: tuple[int, int] | None = None
         self.last_tick = time.perf_counter()
-        self.last_event_count = 0
-        self.last_save_text = "Not yet saved"
-        self._configure_style()
-        self._build_menu()
-        self._build_shell()
-        self._load_game_if_available()
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.anim_time = 0.0
+        self.event_cursor = 0
+        self.last_save = "Autosave pending"
+        self._menu()
+        self._shell()
+        self._load_startup()
+        self._sync_side()
+        root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(self.TICK_MS, self._game_loop)
+        root.after(self.DRAW_MS, self._draw_loop)
         root.after(self.REFRESH_MS, self._refresh_loop)
         root.after(self.GAME_SAVE_MS, self._autosave_game)
         root.after(self.BRAIN_SAVE_MS, self._autosave_brain)
 
-    def _configure_style(self) -> None:
+    def _style(self) -> None:
         style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure("TFrame", background=WIN95["face"])
-        style.configure("TLabel", background=WIN95["face"], foreground="#000000", font=("MS Sans Serif", 9))
-        style.configure("TButton", background=WIN95["face"], foreground="#000000", font=("MS Sans Serif", 9), padding=(6, 3))
+        try: style.theme_use("clam")
+        except tk.TclError: pass
+        for name in ("TFrame", "TLabel", "TCheckbutton", "TRadiobutton"):
+            style.configure(name, background=W95["face"], font=("MS Sans Serif", 9))
+        style.configure("TButton", background=W95["face"], font=("MS Sans Serif", 9), padding=(6, 3))
         style.map("TButton", background=[("active", "#d8d8d8"), ("pressed", "#a8a8a8")])
-        style.configure("TCheckbutton", background=WIN95["face"], font=("MS Sans Serif", 9))
-        style.configure("TNotebook", background=WIN95["face"], borderwidth=2)
-        style.configure("TNotebook.Tab", background=WIN95["face"], font=("MS Sans Serif", 9), padding=(8, 4))
+        style.configure("TNotebook", background=W95["face"], borderwidth=2)
+        style.configure("TNotebook.Tab", background=W95["face"], padding=(8, 4), font=("MS Sans Serif", 9))
         style.map("TNotebook.Tab", background=[("selected", "#e0e0e0")])
-        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground="#000000", rowheight=22, font=("MS Sans Serif", 9))
-        style.configure("Treeview.Heading", background=WIN95["face"], foreground="#000000", font=("MS Sans Serif", 9, "bold"))
-        style.configure("TCombobox", fieldbackground="#ffffff", background=WIN95["face"])
+        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", rowheight=22, font=("MS Sans Serif", 9))
+        style.configure("Treeview.Heading", background=W95["face"], font=("MS Sans Serif", 9, "bold"))
 
-    def _build_menu(self) -> None:
-        menu = tk.Menu(self.root, tearoff=False, bg=WIN95["face"], fg="#000000")
-        file_menu = tk.Menu(menu, tearoff=False, bg=WIN95["face"])
-        file_menu.add_command(label="New Battle", command=self.new_battle)
-        file_menu.add_command(label="Save Now", command=self.save_game)
-        file_menu.add_command(label="Load Autosave", command=self.load_game)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.on_close)
-        menu.add_cascade(label="File", menu=file_menu)
-        game_menu = tk.Menu(menu, tearoff=False, bg=WIN95["face"])
-        game_menu.add_command(label="Pause / Resume", command=self.toggle_pause)
-        game_menu.add_command(label="Allied Victory", command=lambda: self.sim.force_result("Allied"))
-        game_menu.add_command(label="Axis Victory", command=lambda: self.sim.force_result("Axis"))
-        menu.add_cascade(label="Game", menu=game_menu)
-        view_menu = tk.Menu(menu, tearoff=False, bg=WIN95["face"])
-        view_menu.add_command(label="Battlefield", command=lambda: self.main_tabs.select(self.battlefield_tab))
-        view_menu.add_command(label="Neural Network", command=lambda: self.main_tabs.select(self.neural_tab))
-        view_menu.add_command(label="War Diary", command=lambda: self.main_tabs.select(self.diary_tab))
-        menu.add_cascade(label="View", menu=view_menu)
-        help_menu = tk.Menu(menu, tearoff=False, bg=WIN95["face"])
-        help_menu.add_command(label="Controls", command=self.show_controls)
-        help_menu.add_command(label="About", command=self.show_about)
-        menu.add_cascade(label="Help", menu=help_menu)
+    def _choose_side(self, default: str) -> str:
+        result = {"side": default}
+        win = tk.Toplevel(self.root)
+        win.title("New Save — Choose Side")
+        win.configure(bg=W95["face"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        tk.Label(win, text="▣  SELECT PLAYER COMMAND", bg=W95["navy"], fg="white", font=("MS Sans Serif", 10, "bold"), anchor="w").pack(fill="x", padx=3, pady=3)
+        ttk.Label(win, text="Choose the faction this save will focus on. The opposing side is controlled by the persistent neural commander.", wraplength=490, justify="left").pack(fill="x", padx=14, pady=10)
+        choice = tk.StringVar(value=default)
+        row = tk.Frame(win, bg=W95["face"]); row.pack(fill="x", padx=10)
+        for side, text in (("Allied", "Advance from the west. Allied lines stay on the left."), ("Axis", "Defend from the east. The map mirrors so Axis stays on the left.")):
+            card = tk.Frame(row, bg=W95["face"], bd=2, relief="raised", width=240, height=110)
+            card.pack(side="left", padx=5, fill="both", expand=True); card.pack_propagate(False)
+            tk.Label(card, text=f"{side.upper()} COMMAND", bg=W95[side.lower()], fg="white", font=("MS Sans Serif", 9, "bold")).pack(fill="x")
+            ttk.Radiobutton(card, text=f"Control {side}", variable=choice, value=side).pack(anchor="w", padx=8, pady=(10, 4))
+            ttk.Label(card, text=text, wraplength=205, justify="left").pack(anchor="w", padx=8)
+        def accept() -> None:
+            result["side"] = choice.get() if choice.get() in ("Allied", "Axis") else default
+            win.destroy()
+        ttk.Button(win, text="Deploy", command=accept, width=15).pack(anchor="e", padx=15, pady=12)
+        win.protocol("WM_DELETE_WINDOW", accept)
+        win.update_idletasks()
+        win.geometry(f"+{self.root.winfo_rootx()+120}+{self.root.winfo_rooty()+100}")
+        self.root.wait_window(win)
+        return result["side"]
+
+    def _menu(self) -> None:
+        menu = tk.Menu(self.root, tearoff=False, bg=W95["face"])
+        file = tk.Menu(menu, tearoff=False, bg=W95["face"])
+        file.add_command(label="New Battle", command=self.new_battle)
+        file.add_command(label="New Save / Choose Side", command=self.new_save)
+        file.add_separator(); file.add_command(label="Save Now", command=self.save); file.add_command(label="Load Autosave", command=self.load)
+        file.add_separator(); file.add_command(label="Exit", command=self.close)
+        menu.add_cascade(label="File", menu=file)
+        game = tk.Menu(menu, tearoff=False, bg=W95["face"])
+        game.add_command(label="Pause / Resume", command=self.toggle_pause)
+        game.add_command(label="Allied Victory", command=lambda: self.sim.force_result("Allied"))
+        game.add_command(label="Axis Victory", command=lambda: self.sim.force_result("Axis"))
+        menu.add_cascade(label="Game", menu=game)
+        view = tk.Menu(menu, tearoff=False, bg=W95["face"])
+        view.add_command(label="Battlefield", command=lambda: self.tabs.select(self.battle_tab))
+        view.add_command(label="Neural Network", command=lambda: self.tabs.select(self.neural_tab))
+        view.add_command(label="War Diary", command=lambda: self.tabs.select(self.diary_tab))
+        menu.add_cascade(label="View", menu=view)
+        helpm = tk.Menu(menu, tearoff=False, bg=W95["face"])
+        helpm.add_command(label="Controls", command=self.controls); helpm.add_command(label="About", command=self.about)
+        menu.add_cascade(label="Help", menu=helpm)
         self.root.config(menu=menu)
 
-    def _build_shell(self) -> None:
-        title = tk.Frame(self.root, bg=WIN95["navy"], bd=2, relief="raised", height=30)
+    def _shell(self) -> None:
+        title = tk.Frame(self.root, bg=W95["navy"], bd=2, relief="raised")
         title.pack(fill="x", padx=3, pady=3)
-        tk.Label(title, text="▣  GATEWAY TO CAEN — TACTICAL COMMAND", bg=WIN95["navy"], fg="#ffffff", font=("MS Sans Serif", 10, "bold"), anchor="w").pack(side="left", fill="x", expand=True, padx=5, pady=3)
-        self.clock_label = tk.Label(title, text="00:00", bg=WIN95["navy"], fg="#ffffff", font=("MS Sans Serif", 9, "bold"))
-        self.clock_label.pack(side="right", padx=7)
-        self._build_toolbar()
-        self.main_tabs = ttk.Notebook(self.root)
-        self.main_tabs.pack(fill="both", expand=True, padx=5, pady=(0, 3))
-        self.battlefield_tab, self.command_tab, self.intel_tab = ttk.Frame(self.main_tabs), ttk.Frame(self.main_tabs), ttk.Frame(self.main_tabs)
-        self.neural_tab, self.diary_tab, self.options_tab = ttk.Frame(self.main_tabs), ttk.Frame(self.main_tabs), ttk.Frame(self.main_tabs)
-        for frame, title_text in ((self.battlefield_tab, "Battlefield"), (self.command_tab, "Command"), (self.intel_tab, "Intelligence"), (self.neural_tab, "Neural Network"), (self.diary_tab, "War Diary"), (self.options_tab, "Options")):
-            self.main_tabs.add(frame, text=title_text)
-        self._build_battlefield_tabs()
-        self._build_command_tabs()
-        self._build_intelligence_tabs()
-        self._build_neural_tabs()
-        self._build_diary_tab()
-        self._build_options_tabs()
-        self._build_status_bar()
+        self.title_label = tk.Label(title, text="▣  GATEWAY TO CAEN — TACTICAL COMMAND", bg=W95["navy"], fg="white", font=("MS Sans Serif", 10, "bold"), anchor="w")
+        self.title_label.pack(side="left", fill="x", expand=True, padx=5, pady=3)
+        self.clock = tk.Label(title, text="T+ 00:00", bg=W95["navy"], fg="white", font=("MS Sans Serif", 9, "bold")); self.clock.pack(side="right", padx=7)
+        self._toolbar()
+        self.tabs = ttk.Notebook(self.root); self.tabs.pack(fill="both", expand=True, padx=5, pady=(0, 3))
+        self.battle_tab, self.command_tab, self.intel_tab = ttk.Frame(self.tabs), ttk.Frame(self.tabs), ttk.Frame(self.tabs)
+        self.neural_tab, self.diary_tab, self.options_tab = ttk.Frame(self.tabs), ttk.Frame(self.tabs), ttk.Frame(self.tabs)
+        for frame, name in ((self.battle_tab,"Battlefield"),(self.command_tab,"Command"),(self.intel_tab,"Intelligence"),(self.neural_tab,"Neural Network"),(self.diary_tab,"War Diary"),(self.options_tab,"Options")):
+            self.tabs.add(frame, text=name)
+        self._battle_tabs(); self._command_tabs(); self._intel_tabs(); self._neural_tabs(); self._diary(); self._options(); self._statusbar()
 
-    def _build_toolbar(self) -> None:
-        toolbar = tk.Frame(self.root, bg=WIN95["face"], bd=2, relief="raised")
-        toolbar.pack(fill="x", padx=4, pady=(0, 4))
-        for label, command in (("New Battle", self.new_battle), ("Save", self.save_game), ("Pause", self.toggle_pause), ("Hold", lambda: self.order_selected("Hold")), ("Advance", lambda: self.order_selected("Advance")), ("Assault", lambda: self.order_selected("Assault")), ("Retreat", lambda: self.order_selected("Retreat"))):
-            ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=2, pady=2)
-        ttk.Label(toolbar, text="Speed:").pack(side="left", padx=(10, 1))
+    def _toolbar(self) -> None:
+        bar = tk.Frame(self.root, bg=W95["face"], bd=2, relief="raised"); bar.pack(fill="x", padx=4, pady=(0,4))
+        for label, command in (("New Battle",self.new_battle),("Save",self.save),("Pause",self.toggle_pause),("Hold",lambda:self.order("Hold")),("Advance",lambda:self.order("Advance")),("Assault",lambda:self.order("Assault")),("Retreat",lambda:self.order("Retreat"))):
+            ttk.Button(bar, text=label, command=command).pack(side="left", padx=2, pady=2)
+        ttk.Label(bar, text="Speed:").pack(side="left", padx=(10,1))
         self.speed_var = tk.StringVar(value=str(self.speed))
-        speed_box = ttk.Combobox(toolbar, width=6, state="readonly", textvariable=self.speed_var, values=("0.5", "1.0", "2.0", "4.0"))
-        speed_box.pack(side="left", padx=2)
-        speed_box.bind("<<ComboboxSelected>>", self._on_speed_changed)
-        self.ai_var = tk.BooleanVar(value=self.sim.allied_ai_enabled)
-        ttk.Checkbutton(toolbar, text="Allied AI Commander", variable=self.ai_var, command=self._toggle_allied_ai).pack(side="left", padx=10)
-        self.operation_label = ttk.Label(toolbar, text="Operation", font=("MS Sans Serif", 9, "bold"))
-        self.operation_label.pack(side="right", padx=8)
+        box = ttk.Combobox(bar, width=6, state="readonly", textvariable=self.speed_var, values=("0.5","1.0","2.0","4.0")); box.pack(side="left"); box.bind("<<ComboboxSelected>>", self._speed)
+        self.ai_var = tk.BooleanVar(value=False)
+        self.ai_check = ttk.Checkbutton(bar, text="Player AI Commander", variable=self.ai_var, command=self._toggle_ai); self.ai_check.pack(side="left", padx=10)
+        self.operation = ttk.Label(bar, text="Operation", font=("MS Sans Serif",9,"bold")); self.operation.pack(side="right", padx=8)
 
-    def _build_battlefield_tabs(self) -> None:
-        tabs = ttk.Notebook(self.battlefield_tab)
-        tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        map_tab, overview_tab = ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(map_tab, text="Tactical Map")
-        tabs.add(overview_tab, text="Operational Overview")
-        split = tk.PanedWindow(map_tab, orient="horizontal", sashwidth=5, bg=WIN95["face"], bd=0)
-        split.pack(fill="both", expand=True)
-        left = tk.Frame(split, bg=WIN95["face"], bd=2, relief="sunken")
-        right = tk.Frame(split, bg=WIN95["face"], width=280, bd=2, relief="sunken")
-        split.add(left, stretch="always")
-        split.add(right, minsize=260)
-        self.map_canvas = tk.Canvas(left, bg="#1f2f1f", highlightthickness=0, cursor="crosshair")
-        self.map_canvas.pack(fill="both", expand=True)
-        self.map_canvas.bind("<Configure>", lambda _event: self.draw_map())
-        self.map_canvas.bind("<Button-1>", self._map_left_click)
-        self.map_canvas.bind("<Button-3>", self._map_right_click)
-        self.map_canvas.bind("<Motion>", self._map_motion)
-        tk.Label(right, text="SELECTED UNIT", bg=WIN95["navy"], fg="#ffffff", font=("MS Sans Serif", 9, "bold"), anchor="w").pack(fill="x")
-        self.unit_detail = tk.Text(right, height=13, bg="#ffffff", fg="#000000", relief="sunken", bd=2, font=("Courier New", 9), state="disabled", wrap="word")
-        self.unit_detail.pack(fill="x", padx=5, pady=5)
-        order_frame = tk.LabelFrame(right, text=" Orders ", bg=WIN95["face"], font=("MS Sans Serif", 9, "bold"), bd=2, relief="groove")
-        order_frame.pack(fill="x", padx=5, pady=3)
-        for index, order in enumerate(("Hold", "Advance", "Defend", "Assault", "Flank", "Retreat")):
-            ttk.Button(order_frame, text=order, command=lambda name=order: self.order_selected(name)).grid(row=index // 2, column=index % 2, sticky="ew", padx=3, pady=3)
-        order_frame.grid_columnconfigure(0, weight=1)
-        order_frame.grid_columnconfigure(1, weight=1)
-        self.map_hint = ttk.Label(right, text="Left-click a unit. Right-click terrain to move selected units.", wraplength=240, justify="left")
-        self.map_hint.pack(fill="x", padx=7, pady=6)
-        self.overview_text = tk.Text(overview_tab, bg="#ffffff", fg="#000000", relief="sunken", bd=2, font=("Courier New", 10), state="disabled")
-        self.overview_text.pack(fill="both", expand=True, padx=5, pady=5)
+    def _battle_tabs(self) -> None:
+        sub = ttk.Notebook(self.battle_tab); sub.pack(fill="both", expand=True, padx=4, pady=4)
+        tactical, overview = ttk.Frame(sub), ttk.Frame(sub); sub.add(tactical,text="Tactical Map"); sub.add(overview,text="Operational Overview")
+        pane = tk.PanedWindow(tactical, orient="horizontal", sashwidth=5, bg=W95["face"], bd=0); pane.pack(fill="both", expand=True)
+        left = tk.Frame(pane,bg=W95["face"],bd=2,relief="sunken"); right = tk.Frame(pane,bg=W95["face"],bd=2,relief="sunken",width=280)
+        pane.add(left,stretch="always"); pane.add(right,minsize=260)
+        self.canvas = tk.Canvas(left,bg="#172017",highlightthickness=0,cursor="crosshair"); self.canvas.pack(fill="both",expand=True)
+        self.canvas.bind("<Configure>",lambda _e:self.draw()); self.canvas.bind("<Button-1>",self._left); self.canvas.bind("<Button-3>",self._right); self.canvas.bind("<Motion>",self._motion)
+        tk.Label(right,text="SELECTED UNIT",bg=W95["navy"],fg="white",font=("MS Sans Serif",9,"bold"),anchor="w").pack(fill="x")
+        self.detail = tk.Text(right,height=14,bg="white",font=("Courier New",9),bd=2,relief="sunken",state="disabled",wrap="word"); self.detail.pack(fill="x",padx=5,pady=5)
+        orders = tk.LabelFrame(right,text=" Orders ",bg=W95["face"],font=("MS Sans Serif",9,"bold")); orders.pack(fill="x",padx=5,pady=3)
+        for i,name in enumerate(("Hold","Advance","Defend","Assault","Flank","Retreat")):
+            ttk.Button(orders,text=name,command=lambda n=name:self.order(n)).grid(row=i//2,column=i%2,sticky="ew",padx=3,pady=3)
+        orders.grid_columnconfigure(0,weight=1); orders.grid_columnconfigure(1,weight=1)
+        self.hint = ttk.Label(right,text="Left-click a friendly unit. Right-click terrain to move.",wraplength=240,justify="left"); self.hint.pack(fill="x",padx=7,pady=6)
+        self.overview = tk.Text(overview,bg="white",font=("Courier New",10),state="disabled",bd=2,relief="sunken"); self.overview.pack(fill="both",expand=True,padx=5,pady=5)
 
-    def _build_command_tabs(self) -> None:
-        tabs = ttk.Notebook(self.command_tab)
-        tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        roster_tab, orders_tab, reserve_tab = ttk.Frame(tabs), ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(roster_tab, text="Unit Roster")
-        tabs.add(orders_tab, text="Standing Orders")
-        tabs.add(reserve_tab, text="Reinforcements")
-        columns = ("side", "type", "men", "morale", "ammo", "supp", "order")
-        self.roster = ttk.Treeview(roster_tab, columns=columns, show="tree headings", selectmode="extended")
-        self.roster.heading("#0", text="Unit")
-        self.roster.column("#0", width=210)
-        for key, title, width in (("side", "Side", 80), ("type", "Type", 90), ("men", "Men", 65), ("morale", "Morale", 80), ("ammo", "Ammo", 75), ("supp", "Suppression", 90), ("order", "Order", 100)):
-            self.roster.heading(key, text=title)
-            self.roster.column(key, width=width, anchor="center")
-        self.roster.pack(fill="both", expand=True, padx=5, pady=5)
-        self.roster.bind("<<TreeviewSelect>>", self._roster_select)
-        panel = tk.Frame(orders_tab, bg=WIN95["face"], bd=2, relief="sunken")
-        panel.pack(fill="both", expand=True, padx=8, pady=8)
-        tk.Label(panel, text="BATTLEGROUP STANDING ORDERS", bg=WIN95["navy"], fg="#ffffff", font=("MS Sans Serif", 10, "bold"), anchor="w").pack(fill="x")
-        instructions = "1. Select one or more Allied units in the roster or map.\n2. Choose an order. Advance/Flank move toward a map target.\n3. Right-click the tactical map to set a destination.\n4. Assault increases aggression but exposes the unit.\n5. Hold improves suppression recovery and preserves ammunition."
-        ttk.Label(panel, text=instructions, justify="left", font=("MS Sans Serif", 10)).pack(anchor="nw", padx=12, pady=12)
-        buttons = tk.Frame(panel, bg=WIN95["face"])
-        buttons.pack(anchor="nw", padx=10, pady=8)
-        for order in ("Hold", "Advance", "Defend", "Assault", "Flank", "Retreat"):
-            ttk.Button(buttons, text=order, width=16, command=lambda name=order: self.order_selected(name)).pack(side="left", padx=4)
-        ttk.Label(reserve_tab, text="No scheduled reinforcements. New battles generate a fresh map and full order of battle while preserving all learned neural weights.", wraplength=760, justify="left", font=("MS Sans Serif", 10)).pack(anchor="nw", padx=12, pady=12)
+    def _command_tabs(self) -> None:
+        sub=ttk.Notebook(self.command_tab); sub.pack(fill="both",expand=True,padx=4,pady=4)
+        roster,orders,reserves=ttk.Frame(sub),ttk.Frame(sub),ttk.Frame(sub); sub.add(roster,text="Unit Roster"); sub.add(orders,text="Standing Orders"); sub.add(reserves,text="Reinforcements")
+        cols=("type","men","morale","ammo","supp","order")
+        self.roster=ttk.Treeview(roster,columns=cols,show="tree headings",selectmode="extended"); self.roster.heading("#0",text="Unit"); self.roster.column("#0",width=220)
+        for key,title,width in (("type","Type",90),("men","Men",65),("morale","Morale",80),("ammo","Ammo",75),("supp","Suppression",95),("order","Order",100)):
+            self.roster.heading(key,text=title); self.roster.column(key,width=width,anchor="center")
+        self.roster.pack(fill="both",expand=True,padx=5,pady=5); self.roster.bind("<<TreeviewSelect>>",self._roster_select)
+        panel=tk.Frame(orders,bg=W95["face"],bd=2,relief="sunken"); panel.pack(fill="both",expand=True,padx=8,pady=8)
+        tk.Label(panel,text="BATTLEGROUP STANDING ORDERS",bg=W95["navy"],fg="white",font=("MS Sans Serif",10,"bold"),anchor="w").pack(fill="x")
+        self.order_help=ttk.Label(panel,text="",justify="left",font=("MS Sans Serif",10)); self.order_help.pack(anchor="nw",padx=12,pady=12)
+        row=tk.Frame(panel,bg=W95["face"]); row.pack(anchor="nw",padx=10)
+        for name in ("Hold","Advance","Defend","Assault","Flank","Retreat"): ttk.Button(row,text=name,width=14,command=lambda n=name:self.order(n)).pack(side="left",padx=3)
+        ttk.Label(reserves,text="No scheduled reinforcements. New maps preserve the selected faction and all learned neural weights.",wraplength=760,justify="left").pack(anchor="nw",padx=12,pady=12)
 
-    def _build_intelligence_tabs(self) -> None:
-        tabs = ttk.Notebook(self.intel_tab)
-        tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        contacts_tab, terrain_tab, objectives_tab = ttk.Frame(tabs), ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(contacts_tab, text="Enemy Contacts")
-        tabs.add(terrain_tab, text="Terrain Analysis")
-        tabs.add(objectives_tab, text="Objectives")
-        columns = ("type", "strength", "morale", "range", "status")
-        self.contacts = ttk.Treeview(contacts_tab, columns=columns, show="tree headings")
-        self.contacts.heading("#0", text="Contact")
-        self.contacts.column("#0", width=220)
-        for key, title, width in (("type", "Type", 100), ("strength", "Strength", 100), ("morale", "Morale", 100), ("range", "Nearest Allied", 120), ("status", "Status", 120)):
-            self.contacts.heading(key, text=title)
-            self.contacts.column(key, width=width, anchor="center")
-        self.contacts.pack(fill="both", expand=True, padx=5, pady=5)
-        terrain_info = "TERRAIN          COVER     MOVEMENT\n" + "-" * 42 + "\n" + "\n".join(f"{name:<16} {cover:<9} {movement}" for name, cover, movement in (("Open", "5%", "Normal"), ("Road", "0%", "Fast"), ("Woods", "38%", "Slow"), ("Hedgerow", "28%", "Very slow"), ("Village", "48%", "Moderate"), ("Mud", "12%", "Very slow")))
-        terrain_box = tk.Text(terrain_tab, bg="#ffffff", fg="#000000", font=("Courier New", 10), relief="sunken", bd=2)
-        terrain_box.insert("1.0", terrain_info)
-        terrain_box.configure(state="disabled")
-        terrain_box.pack(fill="both", expand=True, padx=8, pady=8)
-        self.objective_tree = ttk.Treeview(objectives_tab, columns=("owner", "value", "capture"), show="tree headings")
-        self.objective_tree.heading("#0", text="Objective")
-        self.objective_tree.column("#0", width=240)
-        for key, title, width in (("owner", "Owner", 120), ("value", "Value", 100), ("capture", "Capture", 180)):
-            self.objective_tree.heading(key, text=title)
-            self.objective_tree.column(key, width=width, anchor="center")
-        self.objective_tree.pack(fill="both", expand=True, padx=5, pady=5)
+    def _intel_tabs(self) -> None:
+        sub=ttk.Notebook(self.intel_tab); sub.pack(fill="both",expand=True,padx=4,pady=4)
+        contacts,terrain,objectives=ttk.Frame(sub),ttk.Frame(sub),ttk.Frame(sub); sub.add(contacts,text="Enemy Contacts"); sub.add(terrain,text="Terrain Analysis"); sub.add(objectives,text="Objectives")
+        cols=("type","strength","range","status")
+        self.contacts=ttk.Treeview(contacts,columns=cols,show="tree headings"); self.contacts.heading("#0",text="Contact"); self.contacts.column("#0",width=220)
+        for key,title,width in (("type","Type",100),("strength","Strength",100),("range","Nearest Friendly",130),("status","Status",120)):
+            self.contacts.heading(key,text=title); self.contacts.column(key,width=width,anchor="center")
+        self.contacts.pack(fill="both",expand=True,padx=5,pady=5)
+        info="TERRAIN          COVER     MOVEMENT\n"+"-"*42+"\n"+"\n".join(f"{n:<16} {c:<9} {m}" for n,c,m in (("Open","5%","Normal"),("Road","0%","Fast"),("Woods","38%","Slow"),("Hedgerow","28%","Very slow"),("Village","48%","Moderate"),("Mud","12%","Very slow")))
+        box=tk.Text(terrain,bg="white",font=("Courier New",10),bd=2,relief="sunken"); box.insert("1.0",info); box.configure(state="disabled"); box.pack(fill="both",expand=True,padx=8,pady=8)
+        self.objectives=ttk.Treeview(objectives,columns=("owner","value","capture"),show="tree headings"); self.objectives.heading("#0",text="Objective"); self.objectives.column("#0",width=240)
+        for key,title,width in (("owner","Known Owner",140),("value","Value",100),("capture","Capture",180)):
+            self.objectives.heading(key,text=title); self.objectives.column(key,width=width,anchor="center")
+        self.objectives.pack(fill="both",expand=True,padx=5,pady=5)
 
-    def _build_neural_tabs(self) -> None:
-        tabs = ttk.Notebook(self.neural_tab)
-        tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        status_tab, decisions_tab, training_tab = ttk.Frame(tabs), ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(status_tab, text="Brain Status")
-        tabs.add(decisions_tab, text="Decisions")
-        tabs.add(training_tab, text="Training")
-        top = tk.Frame(status_tab, bg=WIN95["face"])
-        top.pack(fill="x", padx=8, pady=8)
-        self.brain_status = tk.Text(top, height=13, bg="#ffffff", fg="#000000", font=("Courier New", 10), relief="sunken", bd=2, state="disabled")
-        self.brain_status.pack(side="left", fill="both", expand=True)
-        diagram = tk.Canvas(top, width=360, height=230, bg="#ffffff", relief="sunken", bd=2)
-        diagram.pack(side="right", fill="y", padx=(8, 0))
-        self._draw_network_diagram(diagram)
-        ttk.Label(status_tab, text="The brain file is loaded at startup and silently written every 10 seconds. Learning statistics and weights continue across maps and sessions.", wraplength=900, justify="left").pack(anchor="w", padx=10, pady=5)
-        self.decision_tree = ttk.Treeview(decisions_tab, columns=("q", "count"), show="tree headings")
-        self.decision_tree.heading("#0", text="Action")
-        self.decision_tree.column("#0", width=220)
-        self.decision_tree.heading("q", text="Current Q-value")
-        self.decision_tree.column("q", width=180, anchor="center")
-        self.decision_tree.heading("count", text="Lifetime Selections")
-        self.decision_tree.column("count", width=180, anchor="center")
-        self.decision_tree.pack(fill="both", expand=True, padx=5, pady=5)
-        self.training_text = tk.Text(training_tab, bg="#ffffff", fg="#000000", font=("Courier New", 10), relief="sunken", bd=2, state="disabled", wrap="word")
-        self.training_text.pack(fill="both", expand=True, padx=8, pady=8)
+    def _neural_tabs(self) -> None:
+        sub=ttk.Notebook(self.neural_tab); sub.pack(fill="both",expand=True,padx=4,pady=4)
+        status,decisions,training=ttk.Frame(sub),ttk.Frame(sub),ttk.Frame(sub); sub.add(status,text="Brain Status"); sub.add(decisions,text="Decisions"); sub.add(training,text="Training")
+        self.brain_status=tk.Text(status,bg="white",font=("Courier New",10),state="disabled",bd=2,relief="sunken"); self.brain_status.pack(fill="both",expand=True,padx=8,pady=8)
+        self.decisions=ttk.Treeview(decisions,columns=("q","count"),show="tree headings"); self.decisions.heading("#0",text="Action"); self.decisions.heading("q",text="Q-value"); self.decisions.heading("count",text="Lifetime Selections"); self.decisions.pack(fill="both",expand=True,padx=5,pady=5)
+        self.training=tk.Text(training,bg="white",font=("Courier New",10),state="disabled",bd=2,relief="sunken",wrap="word"); self.training.pack(fill="both",expand=True,padx=8,pady=8)
 
-    def _draw_network_diagram(self, canvas: tk.Canvas) -> None:
-        layers = ((60, 10), (180, 8), (300, 5))
-        nodes: list[list[tuple[float, float]]] = []
-        for x, count in layers:
-            nodes.append([(x, 20 + index * (190 / max(1, count - 1))) for index in range(count)])
-        for source, target in zip(nodes, nodes[1:]):
-            for sx, sy in source:
-                for tx, ty in target:
-                    canvas.create_line(sx, sy, tx, ty, fill="#d0d0d0")
-        for layer_index, layer in enumerate(nodes):
-            fill = ("#d9e5ff", "#fff2b2", "#ffd7d7")[layer_index]
-            for x, y in layer:
-                canvas.create_oval(x - 6, y - 6, x + 6, y + 6, fill=fill, outline="#000000")
-        canvas.create_text(60, 220, text="10 inputs", font=("MS Sans Serif", 8))
-        canvas.create_text(180, 220, text="18 hidden", font=("MS Sans Serif", 8))
-        canvas.create_text(300, 220, text="5 actions", font=("MS Sans Serif", 8))
+    def _diary(self) -> None:
+        self.diary=tk.Text(self.diary_tab,bg="white",font=("Courier New",9),state="disabled",bd=2,relief="sunken",wrap="word"); self.diary.pack(fill="both",expand=True,padx=6,pady=6)
+        self.diary.tag_configure("Command",foreground="#000080",font=("Courier New",9,"bold")); self.diary.tag_configure("Combat",foreground="#8b0000"); self.diary.tag_configure("Orders",foreground="#006000"); self.diary.tag_configure("Objectives",foreground="#703000",font=("Courier New",9,"bold"))
 
-    def _build_diary_tab(self) -> None:
-        self.diary_text = tk.Text(self.diary_tab, bg="#ffffff", fg="#000000", relief="sunken", bd=2, font=("Courier New", 9), state="disabled", wrap="word")
-        scrollbar = ttk.Scrollbar(self.diary_tab, orient="vertical", command=self.diary_text.yview)
-        self.diary_text.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y", pady=6, padx=(0, 6))
-        self.diary_text.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
-        self.diary_text.tag_configure("Command", foreground="#000080", font=("Courier New", 9, "bold"))
-        self.diary_text.tag_configure("Combat", foreground="#8b0000")
-        self.diary_text.tag_configure("Orders", foreground="#006000")
-        self.diary_text.tag_configure("Objectives", foreground="#703000", font=("Courier New", 9, "bold"))
+    def _options(self) -> None:
+        sub=ttk.Notebook(self.options_tab); sub.pack(fill="both",expand=True,padx=4,pady=4)
+        game,persist=ttk.Frame(sub),ttk.Frame(sub); sub.add(game,text="Gameplay"); sub.add(persist,text="Persistence")
+        box=tk.LabelFrame(game,text=" Simulation ",bg=W95["face"],font=("MS Sans Serif",9,"bold")); box.pack(fill="x",padx=10,pady=10)
+        self.ai_check2=ttk.Checkbutton(box,text="Let the neural commander control my faction",variable=self.ai_var,command=self._toggle_ai); self.ai_check2.pack(anchor="w",padx=10,pady=8)
+        self.side_info=ttk.Label(box,text="",justify="left"); self.side_info.pack(anchor="w",padx=10,pady=(0,8))
+        pbox=tk.LabelFrame(persist,text=" Automatic Saves ",bg=W95["face"],font=("MS Sans Serif",9,"bold")); pbox.pack(fill="x",padx=10,pady=10)
+        self.persist=ttk.Label(pbox,text="",justify="left"); self.persist.pack(anchor="w",padx=10,pady=10)
+        ttk.Button(pbox,text="Reset Neural Brain",command=self.reset_brain).pack(anchor="w",padx=10,pady=(0,10))
 
-    def _build_options_tabs(self) -> None:
-        tabs = ttk.Notebook(self.options_tab)
-        tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        gameplay_tab, persistence_tab = ttk.Frame(tabs), ttk.Frame(tabs)
-        tabs.add(gameplay_tab, text="Gameplay")
-        tabs.add(persistence_tab, text="Persistence")
-        game_box = tk.LabelFrame(gameplay_tab, text=" Simulation ", bg=WIN95["face"], font=("MS Sans Serif", 9, "bold"), bd=2, relief="groove")
-        game_box.pack(fill="x", padx=10, pady=10)
-        ttk.Checkbutton(game_box, text="Let the neural commander control Allied units", variable=self.ai_var, command=self._toggle_allied_ai).pack(anchor="w", padx=10, pady=8)
-        ttk.Label(game_box, text="Enemy decisions occur every 2 seconds. Simulation speed can be adjusted from the toolbar.").pack(anchor="w", padx=10, pady=(0, 8))
-        persist_box = tk.LabelFrame(persistence_tab, text=" Automatic Saves ", bg=WIN95["face"], font=("MS Sans Serif", 9, "bold"), bd=2, relief="groove")
-        persist_box.pack(fill="x", padx=10, pady=10)
-        self.persistence_label = ttk.Label(persist_box, text="", justify="left")
-        self.persistence_label.pack(anchor="w", padx=10, pady=10)
-        ttk.Button(persist_box, text="Open Data Folder", command=self.open_data_folder).pack(anchor="w", padx=10, pady=(0, 10))
-        ttk.Button(persist_box, text="Reset Neural Brain", command=self.reset_brain).pack(anchor="w", padx=10, pady=(0, 10))
+    def _statusbar(self) -> None:
+        bar=tk.Frame(self.root,bg=W95["face"],bd=2,relief="sunken"); bar.pack(fill="x",padx=4,pady=(0,4))
+        self.status=tk.Label(bar,text="Ready",bg=W95["face"],anchor="w",font=("MS Sans Serif",8)); self.status.pack(side="left",fill="x",expand=True,padx=4)
+        self.save_status=tk.Label(bar,text="Autosave: pending",bg=W95["face"],font=("MS Sans Serif",8),bd=1,relief="sunken",width=28); self.save_status.pack(side="left",padx=2)
+        self.brain_label=tk.Label(bar,text="Brain: loaded",bg=W95["face"],font=("MS Sans Serif",8),bd=1,relief="sunken",width=24); self.brain_label.pack(side="left",padx=2)
 
-    def _build_status_bar(self) -> None:
-        status = tk.Frame(self.root, bg=WIN95["face"], bd=2, relief="sunken")
-        status.pack(fill="x", padx=4, pady=(0, 4))
-        self.status_left = tk.Label(status, text="Ready", bg=WIN95["face"], anchor="w", font=("MS Sans Serif", 8))
-        self.status_left.pack(side="left", fill="x", expand=True, padx=4)
-        self.status_mid = tk.Label(status, text="Autosave: pending", bg=WIN95["face"], anchor="center", font=("MS Sans Serif", 8), bd=1, relief="sunken", width=28)
-        self.status_mid.pack(side="left", padx=2)
-        self.status_right = tk.Label(status, text="Brain: loaded", bg=WIN95["face"], anchor="center", font=("MS Sans Serif", 8), bd=1, relief="sunken", width=24)
-        self.status_right.pack(side="left", padx=2)
+    def _sync_side(self) -> None:
+        side=self.sim.player_side
+        self.ai_var.set(self.sim.player_ai_enabled)
+        self.title_label.configure(text=f"▣  GATEWAY TO CAEN — {side.upper()} TACTICAL COMMAND")
+        self.ai_check.configure(text=f"{side} AI Commander")
+        self.order_help.configure(text=f"1. Select one or more {side} formations.\n2. Choose an order.\n3. Right-click the tactical map to set a destination.\n4. Fog conceals enemy units outside friendly vision.\n5. Axis maps are mirrored so your force remains on the left.")
+        self.side_info.configure(text=f"Player command: {side}\nEnemy neural command: {self.sim.enemy_side}\nEnemy decisions occur every 2 simulated seconds.")
 
-    def _load_game_if_available(self) -> None:
-        if not self.save_path.exists():
-            return
+    def _load_startup(self) -> None:
+        if not self.save_path.exists(): return
         try:
-            self.sim.load_dict(read_json(self.save_path, {}))
-            self.ai_var.set(self.sim.allied_ai_enabled)
-            self.last_save_text = "Loaded autosave"
-            self.sim.log("Command", "Autosave restored successfully.")
-        except (ValueError, TypeError, KeyError):
-            self.sim.log("Command", "Autosave was invalid; a fresh battle was started.")
+            self.sim.load_dict(read_json(self.save_path, {})); self.last_save="Loaded autosave"; self.sim.log("Command","Autosave restored successfully.")
+        except (ValueError,TypeError,KeyError): self.sim.log("Command","Autosave invalid; fresh battle started.")
 
     def _game_loop(self) -> None:
-        if not self.running:
-            return
-        now = time.perf_counter()
-        real_dt = min(0.5, now - self.last_tick)
-        self.last_tick = now
-        if not self.paused and not self.sim.battle_over:
-            self.sim.tick(real_dt * self.speed)
-        self.root.after(self.TICK_MS, self._game_loop)
+        if not self.running: return
+        now=time.perf_counter(); real_dt=min(0.25,now-self.last_tick); self.last_tick=now
+        if not self.paused:
+            if self.sim.battle_over:
+                if self.sim.advance_post_battle(real_dt): self._new_map_state("New procedural map deployed automatically.")
+            else: self.sim.tick(real_dt*self.speed)
+        self.root.after(self.TICK_MS,self._game_loop)
+
+    def _draw_loop(self) -> None:
+        if not self.running: return
+        self.anim_time=time.perf_counter(); self.draw(); self.root.after(self.DRAW_MS,self._draw_loop)
 
     def _refresh_loop(self) -> None:
-        if not self.running:
-            return
-        self.draw_map()
-        self._refresh_header()
-        self._refresh_selected_detail()
-        self._refresh_roster()
-        self._refresh_contacts()
-        self._refresh_objectives()
-        self._refresh_overview()
-        self._refresh_neural()
-        self._refresh_diary()
-        self._refresh_persistence()
-        self.root.after(self.REFRESH_MS, self._refresh_loop)
+        if not self.running: return
+        self._header(); self._detail(); self._roster(); self._contacts(); self._objective_list(); self._overview(); self._brain(); self._events(); self._persistence()
+        self.root.after(self.REFRESH_MS,self._refresh_loop)
 
-    def draw_map(self) -> None:
-        canvas = self.map_canvas
-        width, height = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
-        cell_w, cell_h = width / MAP_WIDTH, height / MAP_HEIGHT
-        canvas.delete("all")
-        for y, row in enumerate(self.sim.terrain):
-            for x, terrain in enumerate(row):
-                x1, y1 = x * cell_w, y * cell_h
-                canvas.create_rectangle(x1, y1, x1 + cell_w + 1, y1 + cell_h + 1, fill=TERRAIN_COLORS.get(terrain, "#808080"), outline="")
-                if terrain == "woods" and cell_w > 22:
-                    canvas.create_text(x1 + cell_w / 2, y1 + cell_h / 2, text="♣", fill="#163f18", font=("Arial", max(8, int(cell_h * 0.55))))
-                elif terrain == "village" and cell_w > 22:
-                    canvas.create_text(x1 + cell_w / 2, y1 + cell_h / 2, text="▪", fill="#362c27", font=("Arial", max(10, int(cell_h * 0.7))))
-        for x in range(MAP_WIDTH + 1):
-            canvas.create_line(x * cell_w, 0, x * cell_w, height, fill="#000000", stipple="gray75")
-        for y in range(MAP_HEIGHT + 1):
-            canvas.create_line(0, y * cell_h, width, y * cell_h, fill="#000000", stipple="gray75")
-        for point in self.sim.control_points:
-            px, py = (point.x + 0.5) * cell_w, (point.y + 0.5) * cell_h
-            color = WIN95["allied"] if point.owner == "Allied" else WIN95["axis"] if point.owner == "Axis" else WIN95["neutral"]
-            radius = max(7, min(cell_w, cell_h) * 0.34)
-            canvas.create_polygon(px, py - radius, px + radius, py, px, py + radius, px - radius, py, fill="#ffff00", outline=color, width=3)
-            canvas.create_text(px, py + radius + 8, text=point.name, fill="#ffffff", font=("MS Sans Serif", 7, "bold"))
-        for unit in self.sim.living_units():
-            ux, uy = (unit.x + 0.5) * cell_w, (unit.y + 0.5) * cell_h
-            radius = max(6, min(cell_w, cell_h) * 0.32)
-            color = WIN95["allied"] if unit.side == "Allied" else WIN95["axis"]
-            selected = unit.uid in self.selected_ids
-            canvas.create_oval(ux - radius, uy - radius, ux + radius, uy + radius, fill=color, outline="#ffff00" if selected else "#ffffff", width=3 if selected else 1)
-            symbol = {"Rifle": "R", "Support": "MG", "Scout": "S", "Mortar": "M", "Armour": "A"}.get(unit.unit_type, "U")
-            canvas.create_text(ux, uy, text=symbol, fill="#ffffff", font=("Arial", 7, "bold"))
-            canvas.create_rectangle(ux - radius, uy + radius + 2, ux + radius, uy + radius + 5, fill="#400000", outline="")
-            canvas.create_rectangle(ux - radius, uy + radius + 2, ux - radius + radius * 2 * unit.strength, uy + radius + 5, fill="#00c000", outline="")
-            if selected and unit.target_x is not None and unit.target_y is not None:
-                tx, ty = (unit.target_x + 0.5) * cell_w, (unit.target_y + 0.5) * cell_h
-                canvas.create_line(ux, uy, tx, ty, fill="#ffff00", dash=(4, 3), arrow="last")
-        if self.hover_tile:
-            x, y = self.hover_tile
-            canvas.create_rectangle(x * cell_w, y * cell_h, (x + 1) * cell_w, (y + 1) * cell_h, outline="#ffffff", width=2)
+    def _mx(self,x:float,width:float,cell:float,center:bool=True)->float:
+        px=(x+(0.5 if center else 0.0))*cell
+        return width-px if self.sim.player_side=="Axis" else px
+
+    def _tile_rect(self,x:int,y:int,w:float,h:float,cw:float,ch:float)->tuple[float,float,float,float]:
+        x1=w-(x+1)*cw if self.sim.player_side=="Axis" else x*cw
+        return x1,y*ch,x1+cw,(y+1)*ch
+
+    def draw(self) -> None:
+        c=self.canvas; w,h=max(1,c.winfo_width()),max(1,c.winfo_height()); cw,ch=w/MAP_WIDTH,h/MAP_HEIGHT; c.delete("all")
+        visible=self.sim.current_visible_tiles(self.sim.player_side); explored=self.sim.explored_tiles[self.sim.player_side]
+        for y,row in enumerate(self.sim.terrain):
+            for x,t in enumerate(row):
+                x1,y1,x2,y2=self._tile_rect(x,y,w,h,cw,ch); c.create_rectangle(x1,y1,x2+1,y2+1,fill=TERRAIN.get(t,"#777"),outline="")
+                seed=(x*37+y*91+self.sim.seed)%11
+                if t=="woods" and cw>18:
+                    for ox,oy in ((.27,.35),(.62,.25),(.52,.68)):
+                        c.create_oval(x1+cw*(ox-.09),y1+ch*(oy-.12),x1+cw*(ox+.09),y1+ch*(oy+.12),fill="#214b24",outline="#163719")
+                elif t=="village" and cw>20:
+                    c.create_rectangle(x1+cw*.22,y1+ch*.32,x1+cw*.68,y1+ch*.75,fill="#4a3a32",outline="#251b17"); c.create_polygon(x1+cw*.16,y1+ch*.34,x1+cw*.45,y1+ch*.12,x1+cw*.74,y1+ch*.34,fill="#743c31",outline="#2b1b18")
+                elif t=="hedge": c.create_line(x1,y1+ch*.55,x2,y1+ch*.55,fill="#263f21",width=max(2,int(ch*.10)))
+                elif t=="mud" and seed%3==0: c.create_oval(x1+cw*.2,y1+ch*.55,x1+cw*.65,y1+ch*.72,fill="#5a4d38",outline="")
+                if (x,y) not in explored: c.create_rectangle(x1,y1,x2+1,y2+1,fill="#070907",outline="")
+                elif (x,y) not in visible: c.create_rectangle(x1,y1,x2+1,y2+1,fill="#111811",stipple="gray50",outline="")
+        for p in self.sim.control_points:
+            if (p.x,p.y) not in explored: continue
+            px,py=self._mx(p.x,w,cw), (p.y+.5)*ch
+            known=(p.x,p.y) in visible; owner=p.owner if known else "Neutral"; color=W95[owner.lower()] if owner in ("Allied","Axis") else W95["neutral"]
+            r=max(7,min(cw,ch)*.33); c.create_polygon(px,py-r,px+r,py,px,py+r,px-r,py,fill="#ffff4d" if known else "#8c8c4d",outline=color,width=3)
+            c.create_text(px,py+r+8,text=p.name if known else "?",fill="white",font=("MS Sans Serif",7,"bold"))
+        for u in self.sim.living_units():
+            if u.side!=self.sim.player_side and not self.sim.is_unit_visible(u,self.sim.player_side): continue
+            self._draw_unit(c,u,w,h,cw,ch)
+        self._draw_effects(c,w,cw,ch)
+        if self.hover:
+            x,y=self.hover; c.create_rectangle(*self._tile_rect(x,y,w,h,cw,ch),outline="white",width=2)
         if self.sim.battle_over:
-            canvas.create_rectangle(width * 0.22, height * 0.38, width * 0.78, height * 0.62, fill=WIN95["face"], outline="#ffffff", width=3)
-            canvas.create_text(width / 2, height * 0.47, text="BATTLE CONCLUDED", fill="#000000", font=("MS Sans Serif", 18, "bold"))
-            canvas.create_text(width / 2, height * 0.55, text=f"{self.sim.winner} victory", fill=WIN95["navy"], font=("MS Sans Serif", 14, "bold"))
+            remain=math.ceil(self.sim.seconds_until_next_battle); c.create_rectangle(w*.20,h*.36,w*.80,h*.64,fill=W95["face"],outline="white",width=3)
+            c.create_text(w/2,h*.45,text="BATTLE CONCLUDED",font=("MS Sans Serif",18,"bold")); c.create_text(w/2,h*.53,text=f"{self.sim.winner} victory",fill=W95["navy"],font=("MS Sans Serif",14,"bold")); c.create_text(w/2,h*.59,text=f"Next map in {remain} second{'s' if remain!=1 else ''}",font=("MS Sans Serif",10,"bold"))
 
-    def _canvas_to_map(self, event: tk.Event) -> tuple[float, float]:
-        return clamp(event.x / max(1, self.map_canvas.winfo_width()) * MAP_WIDTH, 0, MAP_WIDTH - 0.001), clamp(event.y / max(1, self.map_canvas.winfo_height()) * MAP_HEIGHT, 0, MAP_HEIGHT - 0.001)
-
-    def _map_left_click(self, event: tk.Event) -> None:
-        x, y = self._canvas_to_map(event)
-        nearby = [unit for unit in self.sim.living_units() if distance((unit.x, unit.y), (x, y)) <= 0.75]
-        if nearby:
-            chosen = min(nearby, key=lambda unit: distance((unit.x, unit.y), (x, y)))
-            if not (event.state & 0x0001):
-                self.selected_ids.clear()
-            if chosen.uid in self.selected_ids and event.state & 0x0001:
-                self.selected_ids.remove(chosen.uid)
-            else:
-                self.selected_ids.add(chosen.uid)
+    def _draw_unit(self,c:tk.Canvas,u,w,h,cw,ch)->None:
+        x,y=self._mx(u.x,w,cw),(u.y+.5)*ch; r=max(8,min(cw,ch)*.34); selected=u.uid in self.selected
+        heading=math.pi-u.heading if self.sim.player_side=="Axis" else u.heading
+        bob=math.sin(self.anim_time*10+hash(u.uid)%10)*min(1.5,u.speed*1.8); y+=bob
+        color=W95[u.side.lower()]; outline="#ffff00" if selected else "white"
+        if selected:
+            pulse=r+4+math.sin(self.anim_time*5)*2; c.create_oval(x-pulse,y-pulse,x+pulse,y+pulse,outline="#ffff00",width=2)
+        if u.unit_type=="Armour":
+            c.create_rectangle(x-r,y-r*.65,x+r,y+r*.65,fill=color,outline=outline,width=2); c.create_oval(x-r*.38,y-r*.38,x+r*.38,y+r*.38,fill="#4e5c39",outline="black")
+            c.create_line(x,y,x+math.cos(heading)*r*1.45,y+math.sin(heading)*r*1.45,fill="black",width=3)
         else:
-            self.selected_ids.clear()
+            shape=(x-r,y-r,x+r,y+r)
+            if u.unit_type=="Support": c.create_rectangle(*shape,fill=color,outline=outline,width=2)
+            else: c.create_oval(*shape,fill=color,outline=outline,width=2)
+            symbol={"Rifle":"R","Support":"MG","Scout":"S","Mortar":"M"}.get(u.unit_type,"U"); c.create_text(x,y,text=symbol,fill="white",font=("Arial",7,"bold"))
+            c.create_line(x,y,x+math.cos(heading)*r*.9,y+math.sin(heading)*r*.9,fill="#ffffaa",arrow="last")
+        c.create_text(x,y-r-7,text=u.name if selected else "",fill="white",font=("MS Sans Serif",7,"bold"))
+        barw=r*2; by=y+r+3
+        c.create_rectangle(x-r,by,x+r,by+4,fill="#380000",outline=""); c.create_rectangle(x-r,by,x-r+barw*u.strength,by+4,fill="#20c020",outline="")
+        c.create_rectangle(x-r,by+5,x+r,by+8,fill="#202020",outline=""); c.create_rectangle(x-r,by+5,x-r+barw*(u.morale/100),by+8,fill="#4e9dff",outline="")
+        if u.suppression>20: c.create_arc(x-r-3,y-r-3,x+r+3,y+r+3,start=90,extent=-360*(u.suppression/100),style="arc",outline="#ff8c00",width=2)
+        if self.sim.elapsed-u.last_fire<.18: c.create_oval(x+math.cos(heading)*r*1.1-3,y+math.sin(heading)*r*1.1-3,x+math.cos(heading)*r*1.1+3,y+math.sin(heading)*r*1.1+3,fill="#fff200",outline="#ff7b00")
+        if selected and u.target_x is not None and u.target_y is not None:
+            tx,ty=self._mx(u.target_x,w,cw),(u.target_y+.5)*ch; c.create_line(x,y,tx,ty,fill="#ffff00",dash=(4,3),arrow="last")
 
-    def _map_right_click(self, event: tk.Event) -> None:
-        x, y = self._canvas_to_map(event)
-        allied = [uid for uid in self.selected_ids if self.sim.unit_by_id(uid) and self.sim.unit_by_id(uid).side == "Allied"]
-        if not allied:
-            self.status_left.configure(text="Select at least one Allied unit before issuing a movement order.")
-            return
-        first = self.sim.unit_by_id(allied[0])
-        order = first.order if first and first.order in ("Assault", "Flank", "Retreat") else "Advance"
-        self.sim.issue_order(allied, order, x, y)
-        self.status_left.configure(text=f"Order issued to {len(allied)} unit(s): {order} to grid {int(x):02d},{int(y):02d}")
-
-    def _map_motion(self, event: tk.Event) -> None:
-        x, y = self._canvas_to_map(event)
-        self.hover_tile = int(x), int(y)
-        terrain = self.sim.tile_at(x, y)
-        self.map_hint.configure(text=f"Grid {int(x):02d},{int(y):02d} — {terrain.title()} — cover {int(TERRAIN_COVER.get(terrain, 0) * 100)}%\nLeft-click unit; right-click destination.")
-
-    def _roster_select(self, _event: tk.Event) -> None:
-        self.selected_ids = {item for item in self.roster.selection() if self.sim.unit_by_id(item)}
-        if self.selected_ids:
-            self.main_tabs.select(self.battlefield_tab)
-
-    def order_selected(self, order: str) -> None:
-        allied_ids = [uid for uid in self.selected_ids if self.sim.unit_by_id(uid) and self.sim.unit_by_id(uid).side == "Allied" and self.sim.unit_by_id(uid).alive]
-        if not allied_ids:
-            self.status_left.configure(text="Select one or more living Allied units.")
-            return
-        self.sim.issue_order(allied_ids, order)
-        self.status_left.configure(text=f"{order} order issued to {len(allied_ids)} Allied unit(s).")
-
-    def _refresh_header(self) -> None:
-        minutes, seconds = divmod(int(self.sim.elapsed), 60)
-        self.clock_label.configure(text=f"T+ {minutes:02d}:{seconds:02d}")
-        self.operation_label.configure(text=f"{self.sim.operation_name}  |  {self.sim.weather}{' [PAUSED]' if self.paused else ''}")
-        self.status_left.configure(text=f"Allied score {self.sim.battle_score('Allied')}  |  Axis score {self.sim.battle_score('Axis')}  |  Selected {len(self.selected_ids)}")
-
-    def _refresh_selected_detail(self) -> None:
-        selected = [self.sim.unit_by_id(uid) for uid in self.selected_ids]
-        selected = [unit for unit in selected if unit]
-        if not selected:
-            text = "No unit selected.\n\nUse the map or Unit Roster to select a formation."
-        elif len(selected) > 1:
-            text = f"GROUP SELECTION\n\nUnits: {len(selected)}\nAllied: {sum(1 for unit in selected if unit.side == 'Allied')}\nPersonnel: {sum(unit.men for unit in selected)}\n\nOrders apply to Allied units only."
-        else:
-            unit = selected[0]
-            text = f"{unit.name}\n{'=' * min(28, len(unit.name))}\nSide:       {unit.side}\nType:       {unit.unit_type}\nPersonnel:  {unit.men}/{unit.max_men}\nMorale:     {unit.morale:5.1f}%\nAmmo:       {unit.ammo:5.1f}%\nSuppression:{unit.suppression:5.1f}%\nExperience: {unit.experience:5.2f}\nOrder:      {unit.order}\nStance:     {unit.stance}\nKills:      {unit.kills}\nGrid:       {unit.x:04.1f},{unit.y:04.1f}"
-        self._set_text(self.unit_detail, text)
-
-    def _refresh_roster(self) -> None:
-        existing = set(self.roster.get_children())
-        for unit in self.sim.units:
-            values = (unit.side, unit.unit_type, f"{unit.men}/{unit.max_men}", f"{unit.morale:.0f}%", f"{unit.ammo:.0f}%", f"{unit.suppression:.0f}%", unit.order)
-            if unit.uid in existing:
-                self.roster.item(unit.uid, text=unit.name, values=values)
-                existing.remove(unit.uid)
+    def _draw_effects(self,c,w,cw,ch)->None:
+        for e in self.sim.effects:
+            x1,y1=self._mx(e.x1,w,cw),(e.y1+.5)*ch; x2,y2=self._mx(e.x2,w,cw),(e.y2+.5)*ch; p=e.progress
+            if e.kind=="tracer": c.create_line(x1,y1,x1+(x2-x1)*p,y1+(y2-y1)*p,fill="#fff36b",width=2)
+            elif e.kind=="shell":
+                px=x1+(x2-x1)*p; py=y1+(y2-y1)*p-math.sin(math.pi*p)*max(18,abs(x2-x1)*.12); c.create_oval(px-3,py-3,px+3,py+3,fill="#202020",outline="#ff9b32")
             else:
-                self.roster.insert("", "end", iid=unit.uid, text=unit.name, values=values)
-        for iid in existing:
-            self.roster.delete(iid)
-        self.roster.selection_set([uid for uid in self.selected_ids if self.roster.exists(uid)])
+                radius=(8+22*math.sin(math.pi*min(1,p)))*(1 if e.kind=="impact" else 1.4); c.create_oval(x1-radius,y1-radius,x1+radius,y1+radius,fill="#ff9b24" if p<.45 else "#4b4b4b",outline="#ffe45e",stipple="gray50")
 
-    def _refresh_contacts(self) -> None:
-        self.contacts.delete(*self.contacts.get_children())
-        allied = self.sim.living_units("Allied")
-        for unit in self.sim.living_units("Axis"):
-            nearest = min((distance((unit.x, unit.y), (friend.x, friend.y)) for friend in allied), default=99.0)
-            self.contacts.insert("", "end", text=unit.name, values=(unit.unit_type, f"{unit.men}/{unit.max_men}", f"{unit.morale:.0f}%", f"{nearest:.1f}", "Engaged" if nearest <= 7 else "Observed"))
+    def _from_canvas(self,e:tk.Event)->tuple[float,float]:
+        raw=e.x/max(1,self.canvas.winfo_width())*MAP_WIDTH; x=MAP_WIDTH-raw if self.sim.player_side=="Axis" else raw
+        return clamp(x,0,MAP_WIDTH-.001),clamp(e.y/max(1,self.canvas.winfo_height())*MAP_HEIGHT,0,MAP_HEIGHT-.001)
 
-    def _refresh_objectives(self) -> None:
-        self.objective_tree.delete(*self.objective_tree.get_children())
-        for point in self.sim.control_points:
-            self.objective_tree.insert("", "end", text=point.name, values=(point.owner, point.value, f"{point.capture:+.0f}%"))
+    def _left(self,e:tk.Event)->None:
+        x,y=self._from_canvas(e); nearby=[u for u in self.sim.living_units(self.sim.player_side) if distance((u.x,u.y),(x,y))<=.8]
+        if not nearby: self.selected.clear(); return
+        u=min(nearby,key=lambda z:distance((z.x,z.y),(x,y)))
+        if not e.state&1: self.selected.clear()
+        if u.uid in self.selected and e.state&1: self.selected.remove(u.uid)
+        else: self.selected.add(u.uid)
 
-    def _refresh_overview(self) -> None:
-        allied, axis = self.sim.living_units("Allied"), self.sim.living_units("Axis")
-        objectives = "\n".join(f"  {point.name:<18} {point.owner:<8} {point.capture:+6.1f}%" for point in self.sim.control_points)
-        text = f"OPERATIONAL OVERVIEW\n{'=' * 60}\nOperation: {self.sim.operation_name}\nDate:      {self.sim.date_label}\nWeather:   {self.sim.weather}\nSeed:      {self.sim.seed}\n\nFORCE STATUS\n{'-' * 60}\nAllied: {len(allied):2d} active units / {sum(unit.men for unit in allied):3d} personnel / score {self.sim.battle_score('Allied')}\nAxis:   {len(axis):2d} active units / {sum(unit.men for unit in axis):3d} personnel / score {self.sim.battle_score('Axis')}\n\nOBJECTIVES\n{'-' * 60}\n{objectives}\n\nBattle status: {'CONCLUDED — ' + str(self.sim.winner) + ' victory' if self.sim.battle_over else 'IN PROGRESS'}"
-        self._set_text(self.overview_text, text)
+    def _right(self,e:tk.Event)->None:
+        x,y=self._from_canvas(e); ids=[uid for uid in self.selected if (u:=self.sim.unit_by_id(uid)) and u.alive and u.side==self.sim.player_side]
+        if not ids: self.status.configure(text=f"Select at least one {self.sim.player_side} unit first."); return
+        first=self.sim.unit_by_id(ids[0]); current=first.order if first and first.order in ("Assault","Flank","Retreat") else "Advance"
+        self.sim.issue_order(ids,current,x,y); self.status.configure(text=f"{current} to grid {int(x):02d},{int(y):02d} issued to {len(ids)} unit(s).")
 
-    def _refresh_neural(self) -> None:
-        stats = self.brain.stats
-        total = stats.wins + stats.losses
-        text = f"TACTICAL NEURAL BRAIN\n{'=' * 48}\nArchitecture:       {self.brain.input_size}-{self.brain.hidden_size}-{self.brain.output_size}\nLearning rate:      {self.brain.learning_rate:.4f}\nDiscount factor:    {self.brain.discount:.3f}\nExploration rate:   {self.brain.epsilon:.3f}\nDecisions:          {stats.decisions:,}\nTraining steps:     {stats.training_steps:,}\nLifetime reward:    {stats.lifetime_reward:+.3f}\nAI wins / losses:   {stats.wins} / {stats.losses}\nAI win rate:        {(stats.wins / total * 100 if total else 0):.1f}%\nLast action:        {self.brain.last_action}\nLast train error:   {self.sim.last_training_error:.5f}\nBrain file:         {self.brain_path}"
-        self._set_text(self.brain_status, text)
-        self.decision_tree.delete(*self.decision_tree.get_children())
-        for index, action in enumerate(ACTIONS):
-            self.decision_tree.insert("", "end", text=action.title(), values=(f"{self.brain.last_q_values[index]:+.5f}", f"{stats.action_counts.get(action, 0):,}"))
-        self._set_text(self.training_text, "LEARNING MODEL\n" + "=" * 70 + "\n\nThe enemy commander observes ten normalized tactical signals: unit strength, morale, ammunition, suppression, enemy distance, objective distance, nearby friendly and enemy density, terrain cover, and map progress.\n\nEvery two simulated seconds it selects one of five actions. The prior action is trained using casualties inflicted, casualties suffered, movement toward objectives, terrain use, and retreat discipline. Battle outcomes add a terminal reward.\n\nThe brain is never reset when a new battle begins. Its weights and lifetime statistics are saved independently from the game autosave, allowing learning to continue across maps and sessions.")
-        self.status_right.configure(text=f"Brain: {stats.training_steps:,} training steps")
+    def _motion(self,e:tk.Event)->None:
+        x,y=self._from_canvas(e); self.hover=(int(x),int(y)); t=self.sim.tile_at(x,y); visible=(int(x),int(y)) in self.sim.current_visible_tiles(self.sim.player_side)
+        self.hint.configure(text=f"Grid {int(x):02d},{int(y):02d} — {t.title()} — cover {int(TERRAIN_COVER[t]*100)}%\n{'Visible' if visible else 'Fogged'} terrain; right-click destination.")
 
-    def _refresh_diary(self) -> None:
-        if self.last_event_count > len(self.sim.events):
-            self.last_event_count = 0
-            self._set_text(self.diary_text, "")
-        if self.last_event_count == len(self.sim.events):
-            return
-        self.diary_text.configure(state="normal")
-        for event in self.sim.events[self.last_event_count:]:
-            minutes, seconds = divmod(int(event.timestamp), 60)
-            self.diary_text.insert("end", f"[{minutes:02d}:{seconds:02d}] {event.category.upper():<10} {event.text}\n", event.category)
-        self.last_event_count = len(self.sim.events)
-        self.diary_text.see("end")
-        self.diary_text.configure(state="disabled")
+    def _roster_select(self,_e:tk.Event)->None:
+        self.selected={uid for uid in self.roster.selection() if self.sim.unit_by_id(uid)}
+        if self.selected: self.tabs.select(self.battle_tab)
 
-    def _refresh_persistence(self) -> None:
-        self.persistence_label.configure(text=f"Game autosave interval:   5 seconds\nBrain autosave interval: 10 seconds\nLast status: {self.last_save_text}\n\nGame file:\n  {self.save_path}\n\nBrain file:\n  {self.brain_path}\n\nWrites use a temporary file followed by an atomic replace to reduce corruption risk.")
+    def order(self,name:str)->None:
+        ids=[uid for uid in self.selected if (u:=self.sim.unit_by_id(uid)) and u.alive and u.side==self.sim.player_side]
+        if not ids: self.status.configure(text=f"Select living {self.sim.player_side} units."); return
+        self.sim.issue_order(ids,name); self.status.configure(text=f"{name} issued to {len(ids)} {self.sim.player_side} unit(s).")
+
+    def _header(self)->None:
+        m,s=divmod(int(self.sim.elapsed),60); self.clock.configure(text=f"T+ {m:02d}:{s:02d}")
+        suffix=" [PAUSED]" if self.paused else ""; self.operation.configure(text=f"{self.sim.operation_name} | {self.sim.weather} | {self.sim.player_side}{suffix}")
+        visible=len(self.sim.visible_enemy_units(self.sim.player_side)); self.status.configure(text=f"{self.sim.player_side} score {self.sim.battle_score(self.sim.player_side)} | Visible enemy contacts {visible} | Selected {len(self.selected)}")
+
+    def _detail(self)->None:
+        units=[u for uid in self.selected if (u:=self.sim.unit_by_id(uid))]
+        if not units: text="No unit selected.\n\nSelect a friendly formation on the map or roster."
+        elif len(units)>1: text=f"GROUP SELECTION\n\nUnits: {len(units)}\nPersonnel: {sum(u.men for u in units)}\nAverage morale: {sum(u.morale for u in units)/len(units):.0f}%"
+        else:
+            u=units[0]; text=f"{u.name}\n{'='*min(28,len(u.name))}\nSide:       {u.side}\nType:       {u.unit_type}\nPersonnel:  {u.men}/{u.max_men}\nMorale:     {u.morale:5.1f}%\nAmmo:       {u.ammo:5.1f}%\nSuppression:{u.suppression:5.1f}%\nSpeed:      {u.speed:5.2f}\nOrder:      {u.order}\nStance:     {u.stance}\nKills:      {u.kills}\nGrid:       {u.x:04.1f},{u.y:04.1f}"
+        self._text(self.detail,text)
+
+    def _roster(self)->None:
+        existing=set(self.roster.get_children()); friend_ids={u.uid for u in self.sim.units if u.side==self.sim.player_side}
+        for iid in existing-friend_ids: self.roster.delete(iid)
+        for u in [x for x in self.sim.units if x.side==self.sim.player_side]:
+            values=(u.unit_type,f"{u.men}/{u.max_men}",f"{u.morale:.0f}%",f"{u.ammo:.0f}%",f"{u.suppression:.0f}%",u.order)
+            if self.roster.exists(u.uid): self.roster.item(u.uid,text=u.name,values=values)
+            else: self.roster.insert("","end",iid=u.uid,text=u.name,values=values)
+        self.roster.selection_set([uid for uid in self.selected if self.roster.exists(uid)])
+
+    def _contacts(self)->None:
+        self.contacts.delete(*self.contacts.get_children()); friends=self.sim.living_units(self.sim.player_side)
+        for u in self.sim.visible_enemy_units(self.sim.player_side):
+            near=min((distance((u.x,u.y),(f.x,f.y)) for f in friends),default=99.0); self.contacts.insert("","end",text=u.name,values=(u.unit_type,f"{u.men}/{u.max_men}",f"{near:.1f}","Engaged" if near<=7 else "Observed"))
+
+    def _objective_list(self)->None:
+        self.objectives.delete(*self.objectives.get_children()); visible=self.sim.current_visible_tiles(self.sim.player_side); explored=self.sim.explored_tiles[self.sim.player_side]
+        for p in self.sim.control_points:
+            if (p.x,p.y) not in explored: owner,capture="Unknown","Unknown"
+            elif (p.x,p.y) not in visible: owner,capture="Last known / obscured","—"
+            else: owner,capture=p.owner,f"{p.capture:+.0f}%"
+            self.objectives.insert("","end",text=p.name,values=(owner,p.value,capture))
+
+    def _overview(self)->None:
+        friends=self.sim.living_units(self.sim.player_side); contacts=self.sim.visible_enemy_units(self.sim.player_side); visible=self.sim.current_visible_tiles(self.sim.player_side); explored=self.sim.explored_tiles[self.sim.player_side]
+        known=[]
+        for p in self.sim.control_points:
+            owner=p.owner if (p.x,p.y) in visible else "Obscured" if (p.x,p.y) in explored else "Unknown"; known.append(f"  {p.name:<18} {owner:<10} {p.value:3d} pts")
+        state=f"CONCLUDED — {self.sim.winner}; next map in {self.sim.seconds_until_next_battle:.1f}s" if self.sim.battle_over else "IN PROGRESS"
+        text=f"OPERATIONAL OVERVIEW\n{'='*60}\nOperation: {self.sim.operation_name}\nCommand:   {self.sim.player_side}\nWeather:   {self.sim.weather}\nSeed:      {self.sim.seed}\n\nFRIENDLY FORCE\n{'-'*60}\nActive formations: {len(friends)}\nPersonnel:        {sum(u.men for u in friends)}\nScore:            {self.sim.battle_score(self.sim.player_side)}\n\nINTELLIGENCE\n{'-'*60}\nVisible enemy contacts: {len(contacts)}\nExplored terrain: {len(explored)}/{MAP_WIDTH*MAP_HEIGHT} tiles\n\nOBJECTIVES\n{'-'*60}\n"+"\n".join(known)+f"\n\nBattle status: {state}"
+        self._text(self.overview,text)
+
+    def _brain(self)->None:
+        st=self.brain.stats; total=st.wins+st.losses; rate=st.wins/total*100 if total else 0
+        text=f"TACTICAL NEURAL BRAIN\n{'='*48}\nArchitecture:       {self.brain.input_size}-{self.brain.hidden_size}-{self.brain.output_size}\nLearning rate:      {self.brain.learning_rate:.4f}\nExploration rate:   {self.brain.epsilon:.3f}\nEnemy command:      {self.sim.enemy_side}\nPlayer AI enabled:  {'Yes' if self.sim.player_ai_enabled else 'No'}\nDecisions:          {st.decisions:,}\nTraining steps:     {st.training_steps:,}\nLifetime reward:    {st.lifetime_reward:+.3f}\nAI wins / losses:   {st.wins} / {st.losses}\nAI win rate:        {rate:.1f}%\nLast action:        {self.brain.last_action}\nLast train error:   {self.sim.last_training_error:.5f}\nBrain file:         {self.brain_path}"
+        self._text(self.brain_status,text); self.decisions.delete(*self.decisions.get_children())
+        for i,a in enumerate(ACTIONS): self.decisions.insert("","end",text=a.title(),values=(f"{self.brain.last_q_values[i]:+.5f}",f"{st.action_counts.get(a,0):,}"))
+        self._text(self.training,"The neural commander evaluates strength, morale, ammunition, suppression, enemy and objective distance, local force density, cover, and map progress. Every two simulated seconds it chooses Advance, Flank, Hold, Retreat, or Assault. Weights and lifetime statistics persist across maps and sessions.")
+        self.brain_label.configure(text=f"Brain: {st.training_steps:,} training steps")
+
+    def _events(self)->None:
+        if self.event_cursor>len(self.sim.events): self.event_cursor=0; self._text(self.diary,"")
+        if self.event_cursor==len(self.sim.events): return
+        self.diary.configure(state="normal")
+        for e in self.sim.events[self.event_cursor:]:
+            m,s=divmod(int(e.timestamp),60); self.diary.insert("end",f"[{m:02d}:{s:02d}] {e.category.upper():<10} {e.text}\n",e.category)
+        self.event_cursor=len(self.sim.events); self.diary.see("end"); self.diary.configure(state="disabled")
+
+    def _persistence(self)->None:
+        self.persist.configure(text=f"Game autosave: every 5 seconds\nBrain autosave: every 10 seconds\nMap rotation: 10 seconds after battle end\nPlayer side: {self.sim.player_side}\nLast status: {self.last_save}\n\nGame: {self.save_path}\nBrain: {self.brain_path}")
 
     @staticmethod
-    def _set_text(widget: tk.Text, value: str) -> None:
-        widget.configure(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", value)
-        widget.configure(state="disabled")
+    def _text(widget:tk.Text,value:str)->None:
+        widget.configure(state="normal"); widget.delete("1.0","end"); widget.insert("1.0",value); widget.configure(state="disabled")
 
-    def _autosave_game(self) -> None:
-        if self.running:
-            self.save_game(silent=True)
-            self.root.after(self.GAME_SAVE_MS, self._autosave_game)
+    def _autosave_game(self)->None:
+        if self.running: self.save(silent=True); self.root.after(self.GAME_SAVE_MS,self._autosave_game)
 
-    def _autosave_brain(self) -> None:
-        if not self.running:
-            return
+    def _autosave_brain(self)->None:
+        if not self.running: return
+        try: self.brain.save(self.brain_path); self.last_save=f"Brain saved at {time.strftime('%H:%M:%S')}"
+        except OSError as e: self.brain_label.configure(text=f"Brain save failed: {e}")
+        self.root.after(self.BRAIN_SAVE_MS,self._autosave_brain)
+
+    def save(self,silent:bool=False)->None:
         try:
-            self.brain.save(self.brain_path)
-            self.last_save_text = f"Brain saved at {time.strftime('%H:%M:%S')}"
-        except OSError as exc:
-            self.status_right.configure(text=f"Brain save failed: {exc}")
-        self.root.after(self.BRAIN_SAVE_MS, self._autosave_brain)
+            atomic_write_json(self.save_path,self.sim.to_dict()); self.settings.update(speed=self.speed,player_side=self.sim.player_side); atomic_write_json(self.settings_path,self.settings)
+            self.last_save=f"Game saved at {time.strftime('%H:%M:%S')}"; self.save_status.configure(text=self.last_save)
+            if not silent: messagebox.showinfo("Save Game",f"Game saved successfully.\n\n{self.save_path}",parent=self.root)
+        except OSError as e:
+            self.save_status.configure(text="Autosave failed")
+            if not silent: messagebox.showerror("Save Error",str(e),parent=self.root)
 
-    def save_game(self, silent: bool = False) -> None:
+    def load(self)->None:
+        try: self.sim.load_dict(read_json(self.save_path,{})); self.selected.clear(); self.event_cursor=0; self._sync_side(); self.status.configure(text="Autosave loaded.")
+        except (ValueError,TypeError,KeyError): messagebox.showerror("Load Error","The autosave could not be loaded.",parent=self.root)
+
+    def _new_map_state(self,message:str)->None:
+        self.selected.clear(); self.hover=None; self.event_cursor=0; self.save(silent=True); self.status.configure(text=message)
+
+    def new_battle(self)->None:
+        if messagebox.askyesno("New Battle",f"Start a new procedural battle as {self.sim.player_side}?\n\nThe neural brain and side are preserved.",parent=self.root): self.sim.new_battle(); self._new_map_state("New battle started.")
+
+    def new_save(self)->None:
+        if self.save_path.exists() and not messagebox.askyesno("New Save","Replace the current autosaved battle?\n\nThe neural brain is preserved.",parent=self.root): return
+        side=self._choose_side(self.sim.player_side); self.sim.set_player_side(side); self.sim.new_battle(); self.settings["player_side"]=side; self._sync_side(); self._new_map_state(f"New {side} command save created.")
+
+    def toggle_pause(self)->None:
+        self.paused=not self.paused; self.last_tick=time.perf_counter(); self.status.configure(text="Simulation paused." if self.paused else "Simulation resumed.")
+
+    def _speed(self,_e:tk.Event|None=None)->None:
+        try: self.speed=float(self.speed_var.get())
+        except ValueError: self.speed=1.0
+        self.settings["speed"]=self.speed; atomic_write_json(self.settings_path,self.settings)
+
+    def _toggle_ai(self)->None:
+        self.sim.player_ai_enabled=bool(self.ai_var.get()); self.status.configure(text=f"{self.sim.player_side} AI Commander {'enabled' if self.sim.player_ai_enabled else 'disabled'}.")
+
+    def reset_brain(self)->None:
+        if messagebox.askyesno("Reset Neural Brain","Erase all learned neural weights and lifetime statistics?",parent=self.root): self.brain=TacticalBrain(); self.sim.brain=self.brain; self.brain.save(self.brain_path); self.status.configure(text="Neural brain reset.")
+
+    def controls(self)->None:
+        messagebox.showinfo("Controls",f"Left-click: select a visible {self.sim.player_side} unit\nShift + left-click: multi-select\nRight-click: move selected units\n\nAxis maps are mirrored. Fog conceals enemy contacts. A new map begins automatically ten seconds after battle end.",parent=self.root)
+
+    def about(self)->None:
+        messagebox.showinfo("About","Gateway to Caen: Tactical Command\nVersion 0.2.0\n\nAn original clean-room tactical game built with Python and Tkinter. No proprietary code or assets are included.",parent=self.root)
+
+    def close(self)->None:
+        self.running=False
         try:
-            atomic_write_json(self.save_path, self.sim.to_dict())
-            self.last_save_text = f"Game saved at {time.strftime('%H:%M:%S')}"
-            self.status_mid.configure(text=self.last_save_text)
-            if not silent:
-                messagebox.showinfo("Save Game", f"Game saved successfully.\n\n{self.save_path}", parent=self.root)
-        except OSError as exc:
-            self.status_mid.configure(text="Autosave failed")
-            if not silent:
-                messagebox.showerror("Save Error", str(exc), parent=self.root)
-
-    def load_game(self) -> None:
-        try:
-            self.sim.load_dict(read_json(self.save_path, {}))
-            self.selected_ids.clear()
-            self.last_event_count = 0
-            self.ai_var.set(self.sim.allied_ai_enabled)
-        except (ValueError, TypeError, KeyError):
-            messagebox.showerror("Load Error", "The autosave could not be loaded.", parent=self.root)
-
-    def new_battle(self) -> None:
-        if messagebox.askyesno("New Battle", "Start a new procedurally generated battle?\n\nThe neural brain will be preserved.", parent=self.root):
-            self.sim.new_battle()
-            self.selected_ids.clear()
-            self.last_event_count = 0
-            self.save_game(silent=True)
-
-    def toggle_pause(self) -> None:
-        self.paused = not self.paused
-        self.last_tick = time.perf_counter()
-
-    def _on_speed_changed(self, _event: tk.Event | None = None) -> None:
-        try:
-            self.speed = float(self.speed_var.get())
-        except ValueError:
-            self.speed = 1.0
-        self.settings["speed"] = self.speed
-        atomic_write_json(self.settings_path, self.settings)
-
-    def _toggle_allied_ai(self) -> None:
-        self.sim.allied_ai_enabled = bool(self.ai_var.get())
-
-    def reset_brain(self) -> None:
-        if messagebox.askyesno("Reset Neural Brain", "Erase all learned neural weights and lifetime statistics?\n\nThis cannot be undone.", parent=self.root):
-            self.brain = TacticalBrain()
-            self.sim.brain = self.brain
-            self.brain.save(self.brain_path)
-
-    def open_data_folder(self) -> None:
-        try:
-            import os
-            import subprocess
-            import sys
-            if sys.platform.startswith("win"):
-                os.startfile(self.data_dir)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(self.data_dir)])
-            else:
-                subprocess.Popen(["xdg-open", str(self.data_dir)])
-        except OSError:
-            messagebox.showinfo("Data Folder", str(self.data_dir), parent=self.root)
-
-    def show_controls(self) -> None:
-        messagebox.showinfo("Controls", "Left-click: select a unit\nShift + left-click: multi-select\nRight-click: move selected Allied units\n\nUse the toolbar or Command tab to set orders. Enemy AI decides and learns every two simulated seconds.", parent=self.root)
-
-    def show_about(self) -> None:
-        messagebox.showinfo("About", "Gateway to Caen: Tactical Command\nVersion 0.1.0\n\nAn original clean-room tactical command game built with Python and Tkinter. It uses no proprietary game code or assets.", parent=self.root)
-
-    def on_close(self) -> None:
-        self.running = False
-        try:
-            atomic_write_json(self.save_path, self.sim.to_dict())
-            self.brain.save(self.brain_path)
-            self.settings["speed"] = self.speed
-            atomic_write_json(self.settings_path, self.settings)
-        finally:
-            self.root.destroy()
+            atomic_write_json(self.save_path,self.sim.to_dict()); self.brain.save(self.brain_path); self.settings.update(speed=self.speed,player_side=self.sim.player_side); atomic_write_json(self.settings_path,self.settings)
+        finally: self.root.destroy()
 
 
-def run() -> None:
-    root = tk.Tk()
-    TacticalCommandApp(root)
-    root.mainloop()
+def run()->None:
+    root=tk.Tk(); TacticalCommandApp(root); root.mainloop()
