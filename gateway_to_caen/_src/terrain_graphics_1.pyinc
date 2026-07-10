@@ -1,0 +1,214 @@
+"""Cached terrain, fog, objective, and map-frame rendering."""
+from __future__ import annotations
+import math
+import tkinter as tk
+from .simulation import MAP_HEIGHT, MAP_WIDTH, Obstacle
+from .ui import TERRAIN, W95
+
+class TerrainGraphicsMixin:
+
+    def draw(self) -> None:
+        c = self.canvas
+        w, h = (max(1, c.winfo_width()), max(1, c.winfo_height()))
+        cw, ch = (w / MAP_WIDTH, h / MAP_HEIGHT)
+        signature = (self.sim.seed, w, h, self.sim.player_side, len(self.sim.obstacles))
+        if signature != self.terrain_signature:
+            c.delete('all')
+            self._draw_battlefield_background(c, w, h, cw, ch)
+            self.terrain_signature = signature
+            self.fog_signature = None
+        visible = self.sim.current_visible_tiles(self.sim.player_side)
+        explored = self.sim.explored_tiles[self.sim.player_side]
+        fog_signature = (self.sim.seed, self.sim.player_side, frozenset(visible), frozenset(explored), w, h)
+        if fog_signature != self.fog_signature:
+            c.delete('fog')
+            self._draw_fog(c, w, h, cw, ch, visible, explored)
+            self.fog_signature = fog_signature
+        c.delete('frame')
+        self._draw_objectives(c, w, cw, ch, visible, explored)
+        for unit in self.sim.living_units():
+            if unit.side != self.sim.player_side and (not self.sim.is_unit_visible(unit, self.sim.player_side)):
+                continue
+            self._draw_unit(c, unit, w, h, cw, ch)
+        self._draw_effects(c, w, cw, ch)
+        self._draw_obstacle_effects(c, w, h, cw, ch)
+        self._draw_weather(c, w, h)
+        if self.hover:
+            x, y = self.hover
+            x1, y1, x2, y2 = self._tile_rect(x, y, w, h, cw, ch)
+            c.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, outline='#f8f8f8', width=2, tags='frame')
+            c.create_line(x1, (y1 + y2) / 2, x2, (y1 + y2) / 2, fill='#ffffff', stipple='gray50', tags='frame')
+            c.create_line((x1 + x2) / 2, y1, (x1 + x2) / 2, y2, fill='#ffffff', stipple='gray50', tags='frame')
+        c.create_rectangle(1, 1, w - 2, h - 2, outline='#101510', width=3, tags='frame')
+        if self.sim.battle_over:
+            remain = math.ceil(self.sim.seconds_until_next_battle)
+            c.create_rectangle(w * 0.2 + 4, h * 0.36 + 4, w * 0.8 + 4, h * 0.64 + 4, fill='#202020', outline='', tags='frame')
+            c.create_rectangle(w * 0.2, h * 0.36, w * 0.8, h * 0.64, fill=W95['face'], outline='white', width=3, tags='frame')
+            c.create_rectangle(w * 0.205, h * 0.37, w * 0.795, h * 0.405, fill=W95['navy'], outline='', tags='frame')
+            c.create_text(w / 2, h * 0.388, text='AFTER ACTION REPORT', fill='white', font=('MS Sans Serif', 10, 'bold'), tags='frame')
+            c.create_text(w / 2, h * 0.47, text='BATTLE CONCLUDED', font=('MS Sans Serif', 18, 'bold'), tags='frame')
+            c.create_text(w / 2, h * 0.55, text=f'{self.sim.winner} victory', fill=W95['navy'], font=('MS Sans Serif', 14, 'bold'), tags='frame')
+            c.create_text(w / 2, h * 0.6, text=f"Next map in {remain} second{('s' if remain != 1 else '')}", font=('MS Sans Serif', 10, 'bold'), tags='frame')
+
+    def _draw_battlefield_background(self, c: tk.Canvas, w: float, h: float, cw: float, ch: float) -> None:
+        c.create_rectangle(0, 0, w, h, fill='#263326', outline='', tags='terrain')
+        for y, row in enumerate(self.sim.terrain):
+            for x, terrain in enumerate(row):
+                self._draw_terrain_tile(c, x, y, terrain, w, h, cw, ch)
+        for obstacle in self.sim.obstacles:
+            self._draw_obstacle(c, obstacle, w, h, cw, ch)
+        for x in range(MAP_WIDTH + 1):
+            px = w - x * cw if self.sim.player_side == 'Axis' else x * cw
+            c.create_line(px, 0, px, h, fill='#192119', stipple='gray75', tags='terrain')
+        for y in range(MAP_HEIGHT + 1):
+            c.create_line(0, y * ch, w, y * ch, fill='#192119', stipple='gray75', tags='terrain')
+        for x in range(0, MAP_WIDTH, 2):
+            label_x = self._mx(x, w, cw)
+            c.create_text(label_x, 8, text=f'{x:02d}', fill='#d7dfd0', font=('Courier New', 6, 'bold'), tags='terrain')
+
+    def _draw_terrain_tile(self, c: tk.Canvas, x: int, y: int, terrain: str, w: float, h: float, cw: float, ch: float) -> None:
+        x1, y1, x2, y2 = self._tile_rect(x, y, w, h, cw, ch)
+        seed = x * 73 + y * 151 + self.sim.seed * 3 & 65535
+        base = TERRAIN.get(terrain, '#777777')
+        c.create_rectangle(x1, y1, x2 + 1, y2 + 1, fill=base, outline='', tags='terrain')
+        if terrain == 'open':
+            shade = '#71894f' if seed % 2 else '#8aa064'
+            for index in range(2):
+                yy = y1 + ch * (0.28 + index * 0.34)
+                offset = (seed >> index + 1) % 7 / 20 * ch
+                c.create_line(x1 + 2, yy + offset, x2 - 2, yy + offset - ch * 0.09, fill=shade, width=1, tags='terrain')
+            if seed % 5 == 0:
+                c.create_oval(x1 + cw * 0.7, y1 + ch * 0.22, x1 + cw * 0.77, y1 + ch * 0.31, fill='#d1c76a', outline='', tags='terrain')
+            if seed % 7 == 0:
+                c.create_line(x1 + cw * 0.06, y1 + ch * 0.82, x2 - cw * 0.05, y1 + ch * 0.76, fill='#4f633c', dash=(2, 3), tags='terrain')
+        elif terrain == 'road':
+            c.create_rectangle(x1, y1, x2, y2, fill='#8b8068', outline='', tags='terrain')
+            c.create_line(x1, y1 + 2, x2, y1 + 2, fill='#615846', width=2, tags='terrain')
+            c.create_line(x1, y2 - 2, x2, y2 - 2, fill='#d2c7a6', width=2, tags='terrain')
+            c.create_line(x1 + cw * 0.12, y1 + ch * 0.42, x2 - cw * 0.12, y1 + ch * 0.42, fill='#a79c7f', width=1, tags='terrain')
+            c.create_line(x1 + cw * 0.12, y1 + ch * 0.68, x2 - cw * 0.12, y1 + ch * 0.68, fill='#746a55', width=1, tags='terrain')
+            for mark in (0.26, 0.74):
+                c.create_line(x1 + cw * 0.04, y1 + ch * mark, x2 - cw * 0.04, y1 + ch * mark, fill='#5e5748', dash=(4, 5), tags='terrain')
+        elif terrain == 'woods':
+            c.create_rectangle(x1, y1, x2, y2, fill='#31562f', outline='', tags='terrain')
+            trees = ((0.22, 0.32), (0.55, 0.24), (0.78, 0.49), (0.42, 0.68), (0.7, 0.76))
+            for index, (ox, oy) in enumerate(trees):
+                scale = 0.1 + (seed >> index & 1) * 0.025
+                c.create_oval(x1 + cw * (ox - scale) + 2, y1 + ch * (oy - scale) + 3, x1 + cw * (ox + scale) + 2, y1 + ch * (oy + scale) + 3, fill='#173217', outline='', tags='terrain')
+                c.create_line(x1 + cw * ox, y1 + ch * oy, x1 + cw * ox, y1 + ch * (oy + 0.18), fill='#4c3824', width=max(1, int(cw * 0.035)), tags='terrain')
+                c.create_oval(x1 + cw * (ox - scale), y1 + ch * (oy - scale), x1 + cw * (ox + scale), y1 + ch * (oy + scale), fill='#1f4722' if index % 2 else '#285529', outline='#143216', tags='terrain')
+        elif terrain == 'hedge':
+            c.create_line(x1, y1 + ch * 0.61 + 2, x2, y1 + ch * 0.61 + 2, fill='#1c2919', width=max(3, int(ch * 0.15)), tags='terrain')
+            c.create_line(x1, y1 + ch * 0.55, x2, y1 + ch * 0.55, fill='#294a26', width=max(3, int(ch * 0.16)), tags='terrain')
+            for index in range(5):
+                px = x1 + cw * (0.08 + index * 0.21)
+                c.create_oval(px - cw * 0.08, y1 + ch * 0.39, px + cw * 0.08, y1 + ch * 0.62, fill='#3d6634', outline='#244421', tags='terrain')
+        elif terrain == 'village':
+            c.create_rectangle(x1, y1, x2, y2, fill='#77665a', outline='', tags='terrain')
+            c.create_line(x1, y1 + ch * 0.76, x2, y1 + ch * 0.76, fill='#a0937f', width=max(2, int(ch * 0.12)), tags='terrain')
+            houses = ((0.12, 0.18, 0.42, 0.62), (0.55, 0.28, 0.88, 0.72))
+            for index, (ax, ay, bx, by) in enumerate(houses):
+                c.create_rectangle(x1 + cw * ax + 2, y1 + ch * ay + 3, x1 + cw * bx + 2, y1 + ch * by + 3, fill='#342a25', outline='', tags='terrain')
+                c.create_rectangle(x1 + cw * ax, y1 + ch * ay, x1 + cw * bx, y1 + ch * by, fill='#b39a7e' if index else '#9d846d', outline='#41342b', tags='terrain')
+                c.create_polygon(x1 + cw * (ax - 0.04), y1 + ch * ay, x1 + cw * ((ax + bx) / 2), y1 + ch * (ay - 0.16), x1 + cw * (bx + 0.04), y1 + ch * ay, fill='#6e382f', outline='#35201d', tags='terrain')
+                c.create_rectangle(x1 + cw * (ax + 0.1), y1 + ch * (ay + 0.18), x1 + cw * (ax + 0.17), y1 + ch * by, fill='#3f332b', outline='', tags='terrain')
+                c.create_rectangle(x1 + cw * (bx - 0.12), y1 + ch * (ay + 0.16), x1 + cw * (bx - 0.05), y1 + ch * (ay + 0.27), fill='#8fc0d0', outline='#27343a', tags='terrain')
+        elif terrain == 'mud':
+            c.create_rectangle(x1, y1, x2, y2, fill='#6d6248', outline='', tags='terrain')
+            for index in range(2):
+                ox = 0.18 + (seed >> index) % 5 * 0.13
+                oy = 0.28 + (seed >> index + 3) % 4 * 0.15
+                c.create_oval(x1 + cw * ox, y1 + ch * oy, x1 + cw * min(0.94, ox + 0.28), y1 + ch * min(0.88, oy + 0.14), fill='#4f4a39', outline='#83765a', tags='terrain')
+            c.create_line(x1 + cw * 0.1, y1 + ch * 0.18, x2 - cw * 0.1, y2 - ch * 0.12, fill='#4f4737', dash=(3, 3), tags='terrain')
+
+    def _draw_obstacle(self, c: tk.Canvas, obstacle: Obstacle, w: float, h: float, cw: float, ch: float) -> None:
+        """Render a collision obstacle beneath fog using camera-aware coordinates."""
+        px = self._mx(obstacle.x, w, cw, center=False)
+        py = self._my(obstacle.y, h, ch, center=False)
+        half = obstacle.length / 2.0
+        ax = obstacle.x - math.cos(obstacle.angle) * half
+        ay = obstacle.y - math.sin(obstacle.angle) * half
+        bx = obstacle.x + math.cos(obstacle.angle) * half
+        by = obstacle.y + math.sin(obstacle.angle) * half
+        x1 = self._mx(ax, w, cw, center=False)
+        y1 = self._my(ay, h, ch, center=False)
+        x2 = self._mx(bx, w, cw, center=False)
+        y2 = self._my(by, h, ch, center=False)
+        scale = max(3.0, obstacle.radius * (cw + ch) * 0.5)
+        shadow = max(2, int(scale * 0.45))
+        tag = 'terrain'
+        if obstacle.kind == 'crater':
+            c.create_oval(px - scale * 1.25 + 3, py - scale * 0.72 + 3, px + scale * 1.25 + 3, py + scale * 0.72 + 3, fill='#2d2a22', outline='', stipple='gray50', tags=tag)
+            c.create_oval(px - scale * 1.25, py - scale * 0.72, px + scale * 1.25, py + scale * 0.72, fill='#4a4334', outline='#24211b', width=2, tags=tag)
+            c.create_oval(px - scale * 0.72, py - scale * 0.36, px + scale * 0.72, py + scale * 0.36, fill='#25251f', outline='#756c54', tags=tag)
+            return
+        c.create_line(x1 + shadow, y1 + shadow, x2 + shadow, y2 + shadow, fill='#151815', width=max(3, int(scale * 1.55)), stipple='gray50', tags=tag)
+        if obstacle.kind == 'stone_wall':
+            c.create_line(x1, y1, x2, y2, fill='#5c5b53', width=max(4, int(scale * 1.25)), tags=tag)
+            c.create_line(x1, y1 - 1, x2, y2 - 1, fill='#aaa99b', width=max(2, int(scale * 0.48)), dash=(5, 2), tags=tag)
+        elif obstacle.kind == 'roadblock':
+            c.create_line(x1, y1, x2, y2, fill='#5b3b22', width=max(4, int(scale * 0.72)), tags=tag)
+            for ratio in (0.15, 0.5, 0.85):
+                x = x1 + (x2 - x1) * ratio
+                y = y1 + (y2 - y1) * ratio
+                c.create_line(x - scale * 0.35, y - scale * 0.55, x + scale * 0.35, y + scale * 0.55, fill='#d8d2b5', width=2, tags=tag)
+                c.create_line(x - scale * 0.35, y + scale * 0.55, x + scale * 0.35, y - scale * 0.55, fill='#7d3d2b', width=2, tags=tag)
+        elif obstacle.kind == 'anti_tank':
+            for ratio in (0.18, 0.5, 0.82):
+                x = x1 + (x2 - x1) * ratio
+                y = y1 + (y2 - y1) * ratio
+                c.create_line(x - scale * 0.55, y - scale * 0.55, x + scale * 0.55, y + scale * 0.55, fill='#5b6260', width=3, tags=tag)
+                c.create_line(x - scale * 0.55, y + scale * 0.55, x + scale * 0.55, y - scale * 0.55, fill='#929996', width=2, tags=tag)
+                c.create_line(x, y - scale * 0.7, x, y + scale * 0.7, fill='#3c4240', width=2, tags=tag)
+        elif obstacle.kind in ('wreck', 'burning_wreck'):
+            hull = (px - scale * 1.15, py - scale * 0.52, px + scale * 0.78, py - scale * 0.62, px + scale * 1.08, py + scale * 0.08, px + scale * 0.66, py + scale * 0.6, px - scale * 1.02, py + scale * 0.48)
+            c.create_polygon(*[value + (3 if index % 2 == 0 else 4) for index, value in enumerate(hull)], fill='#171915', outline='', tags=tag)
+            c.create_polygon(hull, fill='#3f463b' if obstacle.kind == 'wreck' else '#302d28', outline='#111311', width=2, tags=tag)
+            c.create_oval(px - scale * 0.28, py - scale * 0.34, px + scale * 0.32, py + scale * 0.26, fill='#262b25', outline='#0e100e', tags=tag)
+            c.create_line(px, py, px + math.cos(obstacle.angle) * scale * 1.35, py + math.sin(obstacle.angle) * scale * 1.35, fill='#151715', width=3, tags=tag)
+        elif obstacle.kind == 'bunker':
+            c.create_rectangle(px - scale, py - scale * 0.64, px + scale, py + scale * 0.64, fill='#66675d', outline='#252720', width=2, tags=tag)
+            c.create_polygon(px - scale * 1.08, py - scale * 0.64, px + scale * 0.86, py - scale * 0.64, px + scale, py - scale * 0.22, px - scale, py - scale * 0.22, fill='#85877a', outline='#303229', tags=tag)
+            c.create_rectangle(px - scale * 0.35, py - scale * 0.1, px + scale * 0.42, py + scale * 0.12, fill='#151715', outline='#929489', tags=tag)
+        elif obstacle.kind == 'tree_cluster':
+            for index, (ox, oy, size) in enumerate(((-0.45, 0.12, 0.68), (0.18, -0.34, 0.8), (0.42, 0.28, 0.62), (-0.08, 0.35, 0.72))):
+                cx, cy = (px + ox * scale, py + oy * scale)
+                c.create_line(cx, cy, cx, cy + scale * 0.48, fill='#49331f', width=max(2, int(scale * 0.18)), tags=tag)
+                c.create_oval(cx - scale * size, cy - scale * size, cx + scale * size, cy + scale * size, fill='#1c4320' if index % 2 else '#28552a', outline='#102d15', tags=tag)
+        else:
+            colors = ('#6e675c', '#8c8271', '#4d4a43', '#a0947f')
+            for index, (ox, oy) in enumerate(((-0.42, -0.15), (0.05, -0.38), (0.38, 0.08), (-0.12, 0.36), (0.48, 0.34))):
+                size = scale * (0.28 + index % 2 * 0.12)
+                cx, cy = (px + ox * scale, py + oy * scale)
+                c.create_polygon(cx - size, cy + size * 0.35, cx - size * 0.25, cy - size, cx + size, cy - size * 0.15, cx + size * 0.42, cy + size, fill=colors[index % len(colors)], outline='#302d29', tags=tag)
+
+    def _draw_fog(self, c: tk.Canvas, w: float, h: float, cw: float, ch: float, visible: set[tuple[int, int]], explored: set[tuple[int, int]]) -> None:
+        for y in range(MAP_HEIGHT):
+            for x in range(MAP_WIDTH):
+                x1, y1, x2, y2 = self._tile_rect(x, y, w, h, cw, ch)
+                if (x, y) not in explored:
+                    c.create_rectangle(x1, y1, x2 + 1, y2 + 1, fill='#040604', outline='', tags='fog')
+                    if (x * 3 + y * 5 + self.sim.seed) % 4 == 0:
+                        c.create_line(x1, y2, x2, y1, fill='#0c100c', stipple='gray50', tags='fog')
+                elif (x, y) not in visible:
+                    c.create_rectangle(x1, y1, x2 + 1, y2 + 1, fill='#101710', stipple='gray50', outline='', tags='fog')
+                elif any(((x + dx, y + dy) not in visible for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))):
+                    c.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y2 - 1, outline='#3b4b3b', stipple='gray50', tags='fog')
+
+    def _draw_objectives(self, c: tk.Canvas, w: float, cw: float, ch: float, visible: set[tuple[int, int]], explored: set[tuple[int, int]]) -> None:
+        for point in self.sim.control_points:
+            if (point.x, point.y) not in explored:
+                continue
+            px, py = (self._mx(point.x, w, cw), self._my(point.y, self.canvas.winfo_height(), ch))
+            known = (point.x, point.y) in visible
+            owner = point.owner if known else 'Neutral'
+            color = W95[owner.lower()] if owner in ('Allied', 'Axis') else W95['neutral']
+            radius = max(8, min(cw, ch) * 0.36)
+            c.create_oval(px - radius - 3, py - radius - 1, px + radius + 3, py + radius + 5, fill='#202020', outline='', stipple='gray50', tags='frame')
+            c.create_polygon(px, py - radius, px + radius, py, px, py + radius, px - radius, py, fill='#fff25a' if known else '#85834b', outline=color, width=3, tags='frame')
+            flag_x = px + radius * 0.9
+            c.create_line(flag_x, py - radius * 0.9, flag_x, py + radius * 0.55, fill='#e9e9e9', width=2, tags='frame')
+            c.create_polygon(flag_x, py - radius * 0.9, flag_x + radius * 0.75, py - radius * 0.58, flag_x, py - radius * 0.32, fill=color, outline='#111111', tags='frame')
+            label = point.name if known else 'Unknown objective'
+            c.create_text(px + 1, py + radius + 10, text=label, fill='#111111', font=('MS Sans Serif', 7, 'bold'), tags='frame')
+            c.create_text(px, py + radius + 9, text=label, fill='#ffffff', font=('MS Sans Serif', 7, 'bold'), tags='frame')
