@@ -1,0 +1,121 @@
+"""Campaign UI, neural virtual cursor, sounds, sprites, and adaptive battle systems."""
+from __future__ import annotations
+
+import time
+import tkinter as tk
+from types import SimpleNamespace
+from tkinter import messagebox, ttk
+
+from . import ui as base_ui_module
+from .camera import AutoCameraMixin
+from .campaign import SIDES, UNIT_COSTS, UNIT_TYPES
+from .campaign_simulation import CampaignBattleSimulation
+from .graphics import EnhancedGraphicsMixin
+from .map_visuals import MapVisualMixin
+from .neural import ACTIONS, TacticalBrain
+from .neural_cursor import CursorFollowingCamera, NeuralCursorController
+from .offline import OfflineRewards, claim_offline_progress, dismiss_pending_report, format_duration, touch_profile
+from .persistence import atomic_write_json, read_json, user_data_dir
+from .sound import SoundManager
+from .sprite_graphics import SpriteGraphicsMixin
+from .sprites import SpriteManager
+from .ui import TacticalCommandApp as BaseTacticalCommandApp, W95
+
+base_ui_module.BattleSimulation = CampaignBattleSimulation
+
+
+class TacticalCommandApp(SpriteGraphicsMixin, MapVisualMixin, AutoCameraMixin, EnhancedGraphicsMixin, BaseTacticalCommandApp):
+    """Version 0.6 application with a persistent campaign and visible neural player."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        W95.update(face="#b8bdba", navy="#102d4f", light="#f4f7f5", shadow="#6e7773", dark="#121716", allied="#315f9d", axis="#963b37", neutral="#626b67")
+        self.sprite_manager = SpriteManager(root)
+        self.sound_manager = SoundManager(root, enabled=True)
+        self.profile_path = user_data_dir() / "campaign_profile.json"
+        self.profile, self.offline_report = claim_offline_progress(self.profile_path)
+        camera_settings = read_json(user_data_dir() / "settings.json", {})
+        self._camera_init(bool(camera_settings.get("auto_camera", True)))
+        self.terrain_signature = None
+        self.fog_signature = None
+        self._last_battle_over = False
+        self._neural_injected = False
+        super().__init__(root)
+        self.sound_manager.set_enabled(bool(self.settings.get("sound_enabled", True)))
+        self.sound_var.set(self.sound_manager.enabled)
+        neural_enabled = bool(self.settings.get("neural_mouse", True))
+        self.neural_cursor = NeuralCursorController(self.brain, self.sim.seed, enabled=neural_enabled)
+        self.sim.player_ai_enabled = neural_enabled
+        self.ai_var.set(neural_enabled)
+        self.neural_cursor.reset_for_map(self.sim)
+        self._camera_bindings()
+        self._cursor_bindings()
+        self._install_requisition_tab()
+        self.roster.bind("<Double-1>", lambda _event: self.focus_selected(), add="+")
+        self.canvas.configure(cursor="none" if neural_enabled else "crosshair")
+        if self.offline_report is not None:
+            root.after(180, self._show_offline_report)
+        self.sound_manager.play("battle_start", force=True)
+
+    def _camera_init(self, enabled: bool) -> None:
+        AutoCameraMixin._camera_init(self, enabled)
+        self.camera = CursorFollowingCamera(enabled=enabled)
+
+    def _choose_side(self, default: str) -> str:
+        result = {"side": default}
+        window = tk.Toplevel(self.root)
+        window.title("New Campaign — Choose Command")
+        window.configure(bg=W95["face"])
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.grab_set()
+        tk.Label(window, text="▣  SELECT CAMPAIGN COMMAND", bg=W95["navy"], fg="white", font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x", padx=3, pady=3)
+        ttk.Label(window, text="Choose the faction whose formations will be controlled by the visible neural mouse. The opposing side uses the adaptive conventional commander. Both factions keep persistent rosters and resources.", wraplength=540, justify="left").pack(fill="x", padx=14, pady=10)
+        choice = tk.StringVar(value=default)
+        row = tk.Frame(window, bg=W95["face"]); row.pack(fill="x", padx=10)
+        for side, text in (("Allied", "Advance from the west with a mirrored-friendly command view."), ("Axis", "Defend from the east; the battlefield mirrors so your force stays left.")):
+            card = tk.Frame(row, bg=W95["face"], bd=2, relief="raised", width=255, height=120)
+            card.pack(side="left", padx=5, fill="both", expand=True); card.pack_propagate(False)
+            tk.Label(card, text=f"{side.upper()} CAMPAIGN", bg=W95[side.lower()], fg="white", font=("Segoe UI", 9, "bold")).pack(fill="x")
+            ttk.Radiobutton(card, text=f"Neural cursor controls {side}", variable=choice, value=side).pack(anchor="w", padx=8, pady=(10, 4))
+            ttk.Label(card, text=text, wraplength=220, justify="left").pack(anchor="w", padx=8)
+        def accept() -> None:
+            result["side"] = choice.get() if choice.get() in SIDES else default
+            window.destroy()
+        ttk.Button(window, text="Begin Campaign", command=accept, width=18).pack(anchor="e", padx=15, pady=12)
+        window.protocol("WM_DELETE_WINDOW", accept)
+        window.update_idletasks()
+        window.geometry(f"+{self.root.winfo_rootx()+120}+{self.root.winfo_rooty()+90}")
+        self.root.wait_window(window)
+        return result["side"]
+
+    def _style(self) -> None:
+        style = ttk.Style(self.root)
+        try: style.theme_use("clam")
+        except tk.TclError: pass
+        style.configure("TFrame", background=W95["face"])
+        style.configure("TLabel", background=W95["face"], foreground="#15201c", font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background=W95["face"], font=("Segoe UI", 9))
+        style.configure("TRadiobutton", background=W95["face"], font=("Segoe UI", 9))
+        style.configure("TButton", background="#d9dedb", foreground="#13201b", font=("Segoe UI", 9, "bold"), padding=(7, 4), relief="raised")
+        style.map("TButton", background=[("active", "#eef2ef"), ("pressed", "#9fa9a4")])
+        style.configure("TNotebook", background=W95["face"], borderwidth=1)
+        style.configure("TNotebook.Tab", background="#a9b1ad", foreground="#13201b", padding=(10, 5), font=("Segoe UI", 9, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", "#eef2ef")], foreground=[("selected", W95["navy"])])
+        style.configure("Treeview", background="#f6f8f7", fieldbackground="#f6f8f7", foreground="#14201b", rowheight=25, font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", background="#203c57", foreground="white", font=("Segoe UI", 9, "bold"), relief="raised")
+        style.map("Treeview", background=[("selected", "#315f9d")], foreground=[("selected", "white")])
+
+    def _toolbar(self) -> None:
+        super()._toolbar()
+        toolbar = self.operation.master
+        self.auto_camera_var = tk.BooleanVar(value=self.camera.enabled)
+        self.auto_camera_check = ttk.Checkbutton(toolbar, text="Auto Camera", variable=self.auto_camera_var, command=self.toggle_auto_camera); self.auto_camera_check.pack(side="left", padx=(5, 1))
+        ttk.Button(toolbar, text="Focus", command=self.focus_selected, width=6).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="−", command=lambda: self._camera_zoom_step(-0.18), width=2).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="+", command=lambda: self._camera_zoom_step(0.18), width=2).pack(side="left", padx=1)
+        ttk.Button(toolbar, text="Map", command=self.camera_overview, width=5).pack(side="left", padx=1)
+        self.difficulty_label = tk.Label(toolbar, text="DIFF 1.00×", bg="#202b27", fg="#f3d36a", bd=1, relief="sunken", font=("Consolas", 8, "bold"), padx=6); self.difficulty_label.pack(side="right", padx=4, pady=2)
+        self.wallet_label = tk.Label(toolbar, text="MP 0 | SUP 0 | CP 0", bg="#14243a", fg="#dcecff", bd=1, relief="sunken", font=("Consolas", 8, "bold"), padx=6); self.wallet_label.pack(side="right", padx=4, pady=2)
+
+    def _options(self) -> None:
+        sub = ttk.Notebook(self.options_tab)
