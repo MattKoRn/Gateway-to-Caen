@@ -17,6 +17,7 @@ class FakeApp:
         self.clicks = []
         self.ui_actions = []
         self.ui_visible = False
+        self.battlefield_visible = True
 
     def _neural_left_click_world(self, x, y):
         unit = min(self.sim.living_units(self.sim.player_side), key=lambda item: (item.x-x)**2 + (item.y-y)**2)
@@ -33,6 +34,9 @@ class FakeApp:
     def _neural_right_click_world(self, x, y):
         self.clicks.append(("right", round(x, 2), round(y, 2)))
         self.sim.issue_order(self.selected, next(iter(self.selected)) and self.sim.unit_by_id(next(iter(self.selected))).order, x, y)
+
+    def _is_battlefield_visible(self):
+        return self.battlefield_visible
 
     def _neural_can_navigate_ui(self):
         return True
@@ -71,7 +75,7 @@ class NeuralCursorTests(unittest.TestCase):
             self.assertTrue(any(item[0] == "order" for item in app.clicks))
             self.assertIsNotNone(app.camera.cursor_focus)
 
-    def test_cursor_can_navigate_and_activate_ui_controls(self) -> None:
+    def test_cursor_never_navigates_or_activates_non_map_ui(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             brain = TacticalBrain(seed=303, epsilon=0.0)
             sim = CampaignBattleSimulation(brain, seed=3303, campaign_path=Path(folder) / "campaign.json")
@@ -81,13 +85,25 @@ class NeuralCursorTests(unittest.TestCase):
             cursor.phase = "idle"
             cursor.plan = None
             cursor.next_ui_visit_at = 0.0
-            for _ in range(100):
-                cursor.update(app, 0.1)
-                if app.ui_actions:
-                    break
-            self.assertEqual(app.ui_actions, ["Main tab: Command"])
-            self.assertEqual(cursor.ui_actions_completed, 1)
+            app.battlefield_visible = False
+            for _ in range(80):
+                cursor.update(app, 0.05)
+                sim.elapsed += 0.05
+            self.assertEqual(app.ui_actions, [])
+            self.assertEqual(app.clicks, [])
+            self.assertEqual(cursor.command_label, "WAITING FOR TACTICAL MAP")
             self.assertFalse(cursor.ui_mode)
+            self.assertIsNone(cursor.ui_target)
+            self.assertEqual(cursor.next_ui_visit_at, float("inf"))
+
+            app.battlefield_visible = True
+            for _ in range(400):
+                cursor.update(app, 0.05)
+                sim.elapsed += 0.05
+                if any(item[0] == "left" for item in app.clicks):
+                    break
+            self.assertEqual(app.ui_actions, [])
+            self.assertTrue(any(item[0] == "left" for item in app.clicks))
 
     def test_learning_uses_replay_memory(self) -> None:
         brain = TacticalBrain(seed=302, epsilon=0.0)
