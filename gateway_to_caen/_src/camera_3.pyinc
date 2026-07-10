@@ -1,0 +1,35 @@
+"""Remove the tactical-map activity log while preserving legacy UI call sites."""
+
+
+class _DisabledTacticalActivityLog:
+    """Compatibility shim that never stores or exposes activity messages."""
+
+    entries: tuple[()] = ()
+
+    def clear(self) -> None:
+        return
+
+    def add(self, *_args, **_kwargs) -> bool:
+        return False
+
+    def ingest(self, events, _start_index: int = 0) -> int:
+        return len(events) if hasattr(events, "__len__") else 0
+
+
+_original_camera_init_without_log = AutoCameraMixin._camera_init
+
+
+def _camera_init_without_tactical_activity(self, enabled: bool) -> None:
+    _original_camera_init_without_log(self, enabled)
+    self.tactical_log = _DisabledTacticalActivityLog()
+    self._tactical_event_cursor = 0
+
+
+def _discard_tactical_activity(self, *_args, **_kwargs) -> None:
+    return
+
+
+AutoCameraMixin._camera_init = _camera_init_without_tactical_activity
+AutoCameraMixin._record_tactical = _discard_tactical_activity
+AutoCameraMixin._sync_tactical_log = _discard_tactical_activity
+AutoCameraMixin._draw_tactical_log = _discard_tactical_activity
