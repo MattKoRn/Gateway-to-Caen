@@ -12,8 +12,11 @@ A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command i
 - Side-aware fog of war with persistent explored terrain and concealed enemy contacts.
 - Procedural 26×17 battlefields containing roads, fields, woods, hedgerows, villages, mud, and capturable objectives.
 - Rifle, support, scout, mortar, and armour formations with morale, ammunition, suppression, casualties, experience, and orders.
-- Smooth accelerated troop movement, turning, formation separation, and roughly 30 FPS animation.
+- Smooth accelerated troop movement, turning, formation separation, physical unit collision, and roughly 30 FPS animation.
+- Procedural stone walls, bunkers, roadblocks, anti-tank barriers, wrecks, rubble, tree clusters, and craters.
+- Obstacle-aware steering, collision resolution, clear destination routing, and obstacle line-of-sight blocking.
 - Line of sight, weapon cooldowns, range falloff, terrain cover, objective capture, animated projectiles, explosions, smoke, and weather.
+- A tactical-map non-combat activity overlay that displays only the five newest messages.
 - A persistent `10 → 18 → 5` neural Q-network that decides every two simulated seconds and learns across maps and sessions.
 - Silent game autosaves every **5 seconds** and neural-brain saves every **10 seconds**.
 - Automatic procedural map replacement **10 seconds** after a battle concludes.
@@ -31,7 +34,8 @@ The tactical map includes a toggleable action camera that:
 - dynamically zooms in for individual units and firefights;
 - zooms out to frame groups, objectives, and after-action overviews;
 - displays its current target and zoom level in a battlefield HUD;
-- remembers whether auto camera was enabled between sessions.
+- remembers whether auto camera was enabled between sessions;
+- occasionally selects a friendly formation for several seconds so the full detail panel updates automatically.
 
 Manual camera controls remain available:
 
@@ -41,6 +45,14 @@ Manual camera controls remain available:
 - **F:** focus the selected unit or formation and enable auto camera.
 - **Double-click:** focus selected units.
 - **Focus / − / + / Overview:** toolbar camera controls.
+
+## Tactical Activity Log
+
+The lower-left battlefield overlay is reserved for non-combat activity and is permanently capped at **five messages**. It shows orders, selection changes, camera actions, objective captures, route adjustments, save/load notices, campaign notices, and map/system updates. Combat casualties remain in the full War Diary instead of flooding the tactical overlay.
+
+## Obstacles and Collision
+
+Every procedural map now includes physical obstacles. Units steer around them, slide along their edges, avoid stacking with friendly and enemy formations, and cannot finish a movement order inside solid scenery. Orders placed on blocked ground are moved to the nearest safe endpoint. Bunkers, dense tree clusters, and large wrecks can also interrupt direct line of sight; destroyed armour leaves a smoking battlefield wreck that becomes a new collision obstacle.
 
 ## Other Controls
 
@@ -95,7 +107,7 @@ The report remains pending until manually dismissed and reappears after a crash 
 py -3 -m unittest discover -s tests -v
 ```
 
-The suite covers neural persistence, procedural battles, side-restricted orders, continuous movement, fog spotting, save restoration, automatic map rotation, offline rewards and report persistence, camera target priority, dynamic zoom, map-edge clamping, and after-action overview behaviour.
+The suite covers neural persistence, procedural battles, side-restricted orders, continuous movement, obstacle generation and persistence, collision avoidance, blocked destinations, obstacle line of sight, fog spotting, save restoration, automatic map rotation, offline rewards and report persistence, camera target priority, automatic friendly detail selection, five-message log filtering, dynamic zoom, map-edge clamping, and after-action overview behaviour.
 
 ## Project Layout
 
@@ -103,13 +115,13 @@ The suite covers neural persistence, procedural battles, side-restricted orders,
 main.py                            Application entry point
 run_game.bat                       Windows launcher
 gateway_to_caen/ui.py              Base Windows 95 Tkinter interface
-gateway_to_caen/enhanced_ui.py     Offline progress, campaign UI, and v0.4 shell
-gateway_to_caen/camera.py          Auto-camera target selection and viewport transforms
-gateway_to_caen/terrain_graphics.py Cached terrain, fog, and objectives
+gateway_to_caen/enhanced_ui.py     Offline progress, tactical log, campaign UI, and v0.5 shell
+gateway_to_caen/camera.py          Auto-camera, friendly detail selection, viewport transforms, and five-line log
+gateway_to_caen/terrain_graphics.py Cached terrain, obstacles, fog, and objectives
 gateway_to_caen/unit_graphics.py   Units, combat effects, and weather
-gateway_to_caen/simulation.py      Tactical simulation and battle state
+gateway_to_caen/simulation.py      Tactical simulation, collisions, obstacles, and battle state
 gateway_to_caen/neural.py          Persistent neural Q-network
 gateway_to_caen/offline.py         Offline rewards and campaign profile
 gateway_to_caen/persistence.py     Atomic JSON persistence
-tests/                             Neural, simulation, offline, and camera tests
+tests/                             Neural, simulation, obstacle, offline, camera, and log tests
 ```
