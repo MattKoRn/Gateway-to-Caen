@@ -1,0 +1,151 @@
+"""Neural cursor UI-space navigation for tabs and safe controls."""
+
+import tkinter as tk
+
+_ORIGINAL_CURSOR_INIT_V062 = NeuralCursorController.__init__
+_ORIGINAL_CURSOR_UPDATE_V062 = NeuralCursorController.update
+_ORIGINAL_CURSOR_DRAW_V062 = NeuralCursorController.draw
+_ORIGINAL_CURSOR_RESET_V062 = NeuralCursorController.reset_for_map
+_ORIGINAL_CURSOR_MANUAL_V062 = NeuralCursorController.notify_manual_activity
+_ORIGINAL_CURSOR_ENABLE_V062 = NeuralCursorController.set_enabled
+
+
+def _cursor_init_v062(self, brain, seed: int = 0, enabled: bool = True) -> None:
+    _ORIGINAL_CURSOR_INIT_V062(self, brain, seed, enabled)
+    self.ui_mode = False
+    self.ui_target = None
+    self.ui_x = 120.0
+    self.ui_y = 90.0
+    self.ui_target_x = self.ui_x
+    self.ui_target_y = self.ui_y
+    self.next_ui_visit_at = time.perf_counter() + self.rng.uniform(7.0, 12.0)
+    self.ui_actions_completed = 0
+
+
+def _cursor_cancel_ui(self, app=None) -> None:
+    self.ui_mode = False
+    self.ui_target = None
+    if app is not None and hasattr(app, "_hide_neural_ui_cursor"):
+        app._hide_neural_ui_cursor()
+
+
+def _cursor_manual_v062(self) -> None:
+    _ORIGINAL_CURSOR_MANUAL_V062(self)
+    self.ui_mode = False
+    self.ui_target = None
+
+
+def _cursor_enable_v062(self, enabled: bool) -> None:
+    _ORIGINAL_CURSOR_ENABLE_V062(self, enabled)
+    if not enabled:
+        self.ui_mode = False
+        self.ui_target = None
+
+
+def _cursor_reset_v062(self, sim) -> None:
+    _ORIGINAL_CURSOR_RESET_V062(self, sim)
+    self.ui_mode = False
+    self.ui_target = None
+    self.next_ui_visit_at = time.perf_counter() + self.rng.uniform(6.0, 11.0)
+
+
+def _start_ui_navigation(self, app, target) -> None:
+    self.ui_target = target
+    self.ui_mode = True
+    self.phase_delay = self.rng.uniform(0.15, 0.35)
+    self.ui_target_x, self.ui_target_y = app._neural_target_screen(target)
+    try:
+        w, h = max(1, app.canvas.winfo_width()), max(1, app.canvas.winfo_height())
+        cw, ch = app._camera_cell_sizes(w, h)
+        canvas_x = app._mx(self.world_x, w, cw)
+        canvas_y = app._my(self.world_y, h, ch)
+        self.ui_x = app.canvas.winfo_rootx() - app.root.winfo_rootx() + canvas_x
+        self.ui_y = app.canvas.winfo_rooty() - app.root.winfo_rooty() + canvas_y
+    except (tk.TclError, AttributeError):
+        self.ui_x, self.ui_y = 120.0, 90.0
+    self.command_label = f"OPENING {target.get('label', 'CONTROL').upper()}"
+    if hasattr(app.camera, "clear_cursor_focus"):
+        app.camera.clear_cursor_focus()
+
+
+def _update_ui_navigation(self, app, dt: float) -> None:
+    target = self.ui_target
+    if target is None:
+        self.ui_mode = False
+        return
+    try:
+        self.ui_target_x, self.ui_target_y = app._neural_target_screen(target)
+    except (tk.TclError, AttributeError):
+        self._cursor_cancel_ui(app)
+        return
+    dx = self.ui_target_x - self.ui_x
+    dy = self.ui_target_y - self.ui_y
+    distance_px = math.hypot(dx, dy)
+    speed = 620.0 + self.rng.random() * 150.0
+    if distance_px > 1.0:
+        step = min(distance_px, speed * dt)
+        self.ui_x += dx / distance_px * step
+        self.ui_y += dy / distance_px * step
+    self.phase_delay -= dt
+    app._show_neural_ui_cursor(self.ui_x, self.ui_y, target.get("label", "UI control"))
+    self.command_label = f"UI: {target.get('label', 'CONTROL').upper()}"
+    if distance_px > 7.0 or self.phase_delay > 0.0:
+        return
+    activated = app._neural_activate_ui_target(target)
+    self.click_flash = 0.25
+    self.ui_actions_completed += int(bool(activated))
+    self.last_decision = f"UI: {target.get('label', 'Control')}"
+    is_tab = target.get("kind") == "notebook"
+    self._cursor_cancel_ui(app)
+    # After opening a tab, interact with one function inside it soon. Otherwise
+    # wait long enough that the UI feels deliberate rather than frantic.
+    self.next_ui_visit_at = time.perf_counter() + (self.rng.uniform(1.2, 2.0) if is_tab else self.rng.uniform(14.0, 25.0))
+    self.phase_delay = self.rng.uniform(0.45, 0.9)
+
+
+def _cursor_update_v062(self, app, dt: float) -> None:
+    now = time.perf_counter()
+    if not self.enabled or app.paused or app.sim.battle_over:
+        self._cursor_cancel_ui(app)
+        _ORIGINAL_CURSOR_UPDATE_V062(self, app, dt)
+        return
+    if now < self.manual_pause_until:
+        self._cursor_cancel_ui(app)
+        _ORIGINAL_CURSOR_UPDATE_V062(self, app, dt)
+        return
+    if self.ui_mode:
+        self._update_ui_navigation(app, clamp(dt, 0.0, 0.25))
+        return
+    if (
+        self.phase == "idle"
+        and self.plan is None
+        and now >= self.next_ui_visit_at
+        and hasattr(app, "_neural_can_navigate_ui")
+        and app._neural_can_navigate_ui()
+    ):
+        target = app._next_neural_ui_target()
+        if target is not None:
+            self._start_ui_navigation(app, target)
+            return
+        self.next_ui_visit_at = now + self.rng.uniform(5.0, 8.0)
+    _ORIGINAL_CURSOR_UPDATE_V062(self, app, dt)
+
+
+def _cursor_draw_v062(self, app) -> None:
+    if self.ui_mode:
+        app.canvas.delete("neural-cursor")
+        return
+    if hasattr(app, "_hide_neural_ui_cursor"):
+        app._hide_neural_ui_cursor()
+    _ORIGINAL_CURSOR_DRAW_V062(self, app)
+
+
+NeuralCursorController.__init__ = _cursor_init_v062
+NeuralCursorController.notify_manual_activity = _cursor_manual_v062
+NeuralCursorController.set_enabled = _cursor_enable_v062
+NeuralCursorController.reset_for_map = _cursor_reset_v062
+NeuralCursorController._cursor_cancel_ui = _cursor_cancel_ui
+NeuralCursorController._start_ui_navigation = _start_ui_navigation
+NeuralCursorController._update_ui_navigation = _update_ui_navigation
+NeuralCursorController.update = _cursor_update_v062
+NeuralCursorController.draw = _cursor_draw_v062
