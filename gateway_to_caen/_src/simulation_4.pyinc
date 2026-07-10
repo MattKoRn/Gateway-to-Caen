@@ -1,0 +1,62 @@
+
+def _generate_obstacles_safe(self) -> list[Obstacle]:
+    """Generate obstacles while preserving clear deployment lanes on both map edges."""
+    rng = random.Random(self.seed ^ 190295070)
+    obstacles: list[Obstacle] = []
+    reserved = [(point.x + 0.5, point.y + 0.5, 1.35) for point in self.control_points]
+    specs = {
+        'stone_wall': (0.16, 1.25, False, True),
+        'roadblock': (0.22, 0.95, False, True),
+        'wreck': (0.34, 0.62, True, True),
+        'rubble': (0.38, 0.3, False, True),
+        'tree_cluster': (0.43, 0.1, True, True),
+        'bunker': (0.44, 0.42, True, True),
+        'crater': (0.42, 0.0, False, False),
+        'anti_tank': (0.24, 0.65, False, True),
+    }
+    terrain_choices = {
+        'road': ('roadblock', 'wreck', 'crater'),
+        'woods': ('tree_cluster', 'tree_cluster', 'rubble'),
+        'village': ('rubble', 'bunker', 'stone_wall', 'wreck'),
+        'hedge': ('stone_wall', 'anti_tank', 'tree_cluster'),
+        'mud': ('crater', 'wreck', 'anti_tank'),
+        'open': ('stone_wall', 'crater', 'anti_tank', 'rubble'),
+    }
+    attempts = 0
+    target_count = 24 + rng.randrange(0, 7)
+    while len(obstacles) < target_count and attempts < 520:
+        attempts += 1
+        x = rng.uniform(4.6, MAP_WIDTH - 4.6)
+        y = rng.uniform(1.2, MAP_HEIGHT - 1.2)
+        if any(distance((x, y), (rx, ry)) < safe for rx, ry, safe in reserved):
+            continue
+        terrain = self.tile_at(x, y)
+        kind = rng.choice(terrain_choices.get(terrain, terrain_choices['open']))
+        radius, length, blocks_los, blocks_movement = specs[kind]
+        angle = rng.choice((0.0, math.pi / 2, math.pi / 4, -math.pi / 4)) if length > 0.45 else rng.uniform(-math.pi, math.pi)
+        candidate = Obstacle(
+            uid=f'obs-{len(obstacles):03d}',
+            kind=kind,
+            x=x,
+            y=y,
+            radius=radius,
+            length=length,
+            angle=angle,
+            blocks_movement=blocks_movement,
+            blocks_los=blocks_los,
+        )
+        if any(self._obstacles_overlap(candidate, other, margin=0.32) for other in obstacles):
+            continue
+        obstacles.append(candidate)
+    return obstacles
+
+BattleSimulation._generate_obstacles = _generate_obstacles_safe
+del _generate_obstacles_safe
+
+_base_tick = BattleSimulation.tick
+def _tick_collision_safe(self, dt: float, _base=_base_tick) -> None:
+    _base(self, dt)
+    for unit in self.living_units():
+        unit.x, unit.y = self._resolve_obstacle_collisions(unit, unit.x, unit.y)
+BattleSimulation.tick = _tick_collision_safe
+del _base_tick, _tick_collision_safe
