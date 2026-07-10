@@ -1,84 +1,93 @@
 # Gateway to Caen: Tactical Command
 
-A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command interface, procedural battlefields, side-aware fog of war, persistent game saves, offline campaign progress, and a neural commander that learns across maps and sessions.
+A dependency-free **Tkinter tactical RTS prototype** with a Windows 95 command interface, procedural battlefields, persistent neural commanders, side-aware fog of war, offline campaign progress, and a smooth action-following tactical camera.
 
 > This is an original clean-room project inspired by the broad tactical-command genre. It does not contain proprietary Close Combat code, artwork, maps, audio, scenarios, or data, and it is not affiliated with the original game's publishers or developers.
 
 ## Features
 
-- Windows 95-inspired interface with raised panels, menu bar, toolbar, status bar, main tabs, and sub-tabs.
-- New saves ask whether the player will command **Allied** or **Axis** forces.
-- Axis command mirrors the tactical map horizontally, keeping the player formation on the left side of the screen.
-- Side-aware fog of war:
-  - friendly units reveal terrain around them;
-  - Scout and Armour formations have larger visual ranges;
-  - rain, low cloud, and woods reduce visibility;
-  - currently hidden enemies and objective ownership remain concealed;
-  - previously explored terrain remains dimly visible.
-- Procedural 26×17 maps with roads, woods, hedgerows, villages, mud, and three capturable objectives.
-- Allied and Axis formations including rifle, support, scout, mortar, and armour units.
-- Smooth accelerated movement with continuous velocity, turning, formation separation, and roughly 30 FPS battlefield animation.
-- Improved battle simulation with line of sight, discrete weapon cooldowns, ammunition usage, range falloff, cover, morale, suppression, casualties, objective capture, and battle scoring.
-- Enhanced cached battlefield rendering with layered roads, field furrows, dense tree canopies, hedgerow foliage, multi-building villages, mud tracks, map coordinates, weather overlays, and detailed fog boundaries.
-- Improved unit art with drop shadows, rotated tank hulls and tracks, turrets, infantry weapon silhouettes, scout and mortar icons, selection brackets, movement dust, muzzle flashes, hit flashes, and separate strength, morale, and ammunition bars.
-- Expanded battle effects with glowing tracers, arcing shells, shock rings, sparks, debris, explosions, rolling smoke, rain, low cloud, and clearing sunlight.
-- Orders include Hold, Advance, Defend, Assault, Flank, and Retreat.
-- Enemy neural commander makes a tactical decision every **2 simulated seconds**.
-- Optional player-side AI mode lets the same persistent learning system command both factions.
-- Every concluded battle automatically generates a new procedural map after **10 real seconds**.
-- Neural weights and lifetime statistics are silently saved every **10 seconds**.
-- Game state is silently autosaved every **5 seconds**.
-- Autosave, chosen side, explored terrain, and neural brain are loaded automatically on startup.
-- Offline progress is calculated from the last saved activity timestamp and displayed in a modal Windows 95 command report that remains until manually dismissed.
-- Offline rewards persist in a separate campaign profile: Command Points, Supplies, Reinforcement Tokens, and Intelligence Reports.
-- Pending offline reports survive crashes or forced closes and reappear until dismissed, preventing lost reports or duplicate claims.
-- Rewarded offline time is capped at 30 days per claim.
-- Atomic temporary-file replacement reduces save corruption risk.
+- Windows 95-inspired menus, toolbar, raised panels, status bar, main tabs, and sub-tabs.
+- New saves ask whether the player commands **Allied** or **Axis** forces.
+- Axis command mirrors the battlefield so the player's formations remain on the left.
+- Side-aware fog of war with persistent explored terrain and concealed enemy contacts.
+- Procedural 26×17 battlefields containing roads, fields, woods, hedgerows, villages, mud, and capturable objectives.
+- Rifle, support, scout, mortar, and armour formations with morale, ammunition, suppression, casualties, experience, and orders.
+- Smooth accelerated troop movement, turning, formation separation, and roughly 30 FPS animation.
+- Line of sight, weapon cooldowns, range falloff, terrain cover, objective capture, animated projectiles, explosions, smoke, and weather.
+- A persistent `10 → 18 → 5` neural Q-network that decides every two simulated seconds and learns across maps and sessions.
+- Silent game autosaves every **5 seconds** and neural-brain saves every **10 seconds**.
+- Automatic procedural map replacement **10 seconds** after a battle concludes.
+- Offline progress with a manually dismissible command report showing days, hours, minutes, seconds, and persistent campaign rewards.
+- Atomic JSON writes to reduce save corruption risk.
 - Standard library only; no third-party Python packages are required.
+
+## Auto Camera
+
+The tactical map includes a toggleable action camera that:
+
+- prioritises selected units;
+- follows recent hits, weapon fire, shell impacts, advancing formations, and contested objectives;
+- smoothly scrolls between action areas instead of snapping;
+- dynamically zooms in for individual units and firefights;
+- zooms out to frame groups, objectives, and after-action overviews;
+- displays its current target and zoom level in a battlefield HUD;
+- remembers whether auto camera was enabled between sessions.
+
+Manual camera controls remain available:
+
+- **Mouse wheel:** zoom in or out and switch to manual camera.
+- **Middle-button drag:** pan and switch to manual camera.
+- **C:** toggle auto camera.
+- **F:** focus the selected unit or formation and enable auto camera.
+- **Double-click:** focus selected units.
+- **Focus / − / + / Overview:** toolbar camera controls.
+
+## Other Controls
+
+- **Left-click:** select a visible friendly unit.
+- **Shift + left-click:** add or remove units from the selection.
+- **Right-click:** issue a movement destination.
+- **Toolbar / Command tab:** set Hold, Advance, Defend, Assault, Flank, or Retreat.
+- **New Battle:** generate a new map while preserving side, brain, campaign profile, and camera preference.
+- **New Save / Choose Side:** replace the current battlefield save and choose Allied or Axis command.
+- **Player AI Commander:** let the persistent neural brain command the player's faction too.
 
 ## Run on Windows
 
-1. Install Python 3 from python.org and keep Tcl/Tk enabled during installation.
+1. Install Python 3 and keep Tcl/Tk enabled during installation.
 2. Double-click `run_game.bat`.
 
-Or run from a terminal:
+Or run:
 
 ```powershell
 py -3 main.py
 ```
 
-## Controls
-
-- **Left-click:** select a visible friendly unit.
-- **Shift + left-click:** add or remove friendly units from the selection.
-- **Right-click:** move selected friendly units to a destination.
-- **Toolbar / Command tab:** set orders and stances.
-- **New Battle:** generate a new map while preserving the selected side and neural brain.
-- **New Save / Choose Side:** replace the current autosave and select Allied or Axis command.
-- **Player AI Commander:** allow the neural brain to control the chosen player faction too.
-
 ## Persistent Data
 
-On Windows, data is stored in:
+On Windows, files are stored in:
 
 ```text
 %APPDATA%\GatewayToCaen\
 ```
 
-Files:
-
-- `autosave.json` — battle state, player side, fog-of-war exploration, and post-battle countdown.
+- `autosave.json` — battle state, chosen side, fog exploration, and post-battle countdown.
 - `tactical_brain.json` — neural weights and lifetime learning statistics.
-- `settings.json` — interface speed and preferred player side.
-- `campaign_profile.json` — last active timestamp, campaign reserves, lifetime offline duration, sessions, and pending offline report.
+- `settings.json` — simulation speed, preferred side, and auto-camera toggle.
+- `campaign_profile.json` — last active timestamp, offline rewards, campaign reserves, sessions, and pending report.
 
-Starting a new battle or new save preserves the neural brain and campaign reserves. Closing the application performs a final game, brain, and settings save.
+Starting a new battle or save preserves the neural brain and campaign reserves. Closing performs a final game, brain, profile, and settings save.
 
-## Neural Commander
+## Offline Rewards
 
-The AI uses a `10 → 18 → 5` neural Q-network. Inputs represent unit strength, morale, ammunition, suppression, nearest enemy distance, objective distance, nearby force density, terrain cover, and map progress.
+Reward rates are deterministic and capped at 30 rewarded days per claim:
 
-Its actions are Advance, Flank, Hold, Retreat, and Assault. Training rewards account for casualties inflicted and suffered, objective progress, cover use, retreat discipline, and battle results. The same brain continues learning forever unless manually reset in the Options tab.
+- 1 Command Point per minute.
+- 1 Supply per 10 seconds.
+- 1 Reinforcement Token per 30 minutes.
+- 1 Intelligence Report per hour.
+
+The report remains pending until manually dismissed and reappears after a crash without granting the same offline interval twice.
 
 ## Tests
 
@@ -86,20 +95,21 @@ Its actions are Advance, Flank, Hold, Retreat, and Assault. Training rewards acc
 py -3 -m unittest discover -s tests -v
 ```
 
-The test suite covers neural persistence, procedural map generation, side-restricted orders, continuous movement, fog-of-war spotting, save restoration, automatic ten-second map rotation, offline duration formatting, deterministic reward rates, one-time claims, and manual report dismissal persistence.
+The suite covers neural persistence, procedural battles, side-restricted orders, continuous movement, fog spotting, save restoration, automatic map rotation, offline rewards and report persistence, camera target priority, dynamic zoom, map-edge clamping, and after-action overview behaviour.
 
 ## Project Layout
 
 ```text
-main.py                         Application entry point
-run_game.bat                    Windows launcher
-gateway_to_caen/ui.py           Base Tkinter Windows 95 interface
-gateway_to_caen/enhanced_ui.py  Offline progress and enhanced app shell
-gateway_to_caen/terrain_graphics.py Cached terrain and fog rendering
-gateway_to_caen/unit_graphics.py Detailed unit and battle effects
-gateway_to_caen/simulation.py   Tactical simulation, fog, combat, and battle state
-gateway_to_caen/neural.py       Persistent neural Q-network
-gateway_to_caen/persistence.py  Atomic JSON persistence
-gateway_to_caen/offline.py      Offline rewards and campaign profile
-tests/                          Neural, simulation, and offline tests
+main.py                            Application entry point
+run_game.bat                       Windows launcher
+gateway_to_caen/ui.py              Base Windows 95 Tkinter interface
+gateway_to_caen/enhanced_ui.py     Offline progress, campaign UI, and v0.4 shell
+gateway_to_caen/camera.py          Auto-camera target selection and viewport transforms
+gateway_to_caen/terrain_graphics.py Cached terrain, fog, and objectives
+gateway_to_caen/unit_graphics.py   Units, combat effects, and weather
+gateway_to_caen/simulation.py      Tactical simulation and battle state
+gateway_to_caen/neural.py          Persistent neural Q-network
+gateway_to_caen/offline.py         Offline rewards and campaign profile
+gateway_to_caen/persistence.py     Atomic JSON persistence
+tests/                             Neural, simulation, offline, and camera tests
 ```
