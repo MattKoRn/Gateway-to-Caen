@@ -1,0 +1,46 @@
+"""Version 0.6.3 presentation and hard UI restrictions for the neural pointer."""
+
+
+def _neural_can_navigate_ui_v063(self) -> bool:
+    return False
+
+
+def _next_neural_ui_target_v063(self):
+    return None
+
+
+def _neural_activate_ui_target_v063(self, target) -> bool:
+    # Defence in depth: even an external or stale target cannot operate tabs,
+    # buttons, settings, lists, trees, subtabs, or other non-map widgets.
+    self._hide_neural_ui_cursor()
+    return False
+
+
+def _controls_v063(self) -> None:
+    messagebox.showinfo(
+        "Controls",
+        "The neural mouse is restricted to the tactical map. It may select friendly formations, "
+        "choose tactical orders, and right-click battlefield destinations, but it cannot open tabs "
+        "or operate any other interface control.\n\n"
+        "N: toggle neural mouse\nC: toggle auto camera\nF: focus selection\n"
+        "Mouse wheel: zoom\nMiddle-drag: pan\nLeft-click: manual selection or tab/control use\n"
+        "Right-click: manual destination\n\nAny human click or keypress pauses the neural pointer for twelve seconds.",
+        parent=self.root,
+    )
+
+
+def _about_v063(self) -> None:
+    messagebox.showinfo(
+        "About",
+        "Gateway to Caen: Tactical Command\nVersion 0.6.3\n\n"
+        "Responsive tabs, a tactical-map-only neural mouse, persistent armies, adaptive conventional "
+        "enemy AI, runtime-generated artwork, and sound effects.",
+        parent=self.root,
+    )
+
+
+TacticalCommandApp._neural_can_navigate_ui = _neural_can_navigate_ui_v063
+TacticalCommandApp._next_neural_ui_target = _next_neural_ui_target_v063
+TacticalCommandApp._neural_activate_ui_target = _neural_activate_ui_target_v063
+TacticalCommandApp.controls = _controls_v063
+TacticalCommandApp.about = _about_v063
