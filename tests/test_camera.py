@@ -1,19 +1,18 @@
 import unittest
-
 from gateway_to_caen.camera import TacticalCamera
 from gateway_to_caen.neural import TacticalBrain
 from gateway_to_caen.simulation import MAP_HEIGHT, MAP_WIDTH, BattleSimulation
 
-
 class TacticalCameraTests(unittest.TestCase):
+
     def setUp(self) -> None:
-        self.sim = BattleSimulation(TacticalBrain(seed=17), seed=1701, player_side="Allied")
+        self.sim = BattleSimulation(TacticalBrain(seed=17), seed=1701, player_side='Allied')
 
     def test_selected_unit_gets_camera_priority(self) -> None:
         camera = TacticalCamera(enabled=True)
-        unit = self.sim.living_units("Allied")[0]
+        unit = self.sim.living_units('Allied')[0]
         camera.update(self.sim, {unit.uid}, 0.3)
-        self.assertEqual(camera.focus_label, "Selected formation")
+        self.assertEqual(camera.focus_label, 'Selected formation')
         self.assertGreater(camera.target_zoom, 2.0)
         half_w = MAP_WIDTH / (2 * camera.target_zoom)
         half_h = MAP_HEIGHT / (2 * camera.target_zoom)
@@ -22,10 +21,10 @@ class TacticalCameraTests(unittest.TestCase):
 
     def test_recent_fire_focuses_action(self) -> None:
         camera = TacticalCamera(enabled=True)
-        unit = self.sim.living_units("Allied")[0]
+        unit = self.sim.living_units('Allied')[0]
         unit.last_fire = self.sim.elapsed
         camera.update(self.sim, set(), 0.3)
-        self.assertEqual(camera.focus_label, "Active firefight")
+        self.assertEqual(camera.focus_label, 'Active firefight')
         self.assertGreater(camera.target_zoom, 1.2)
 
     def test_manual_zoom_disables_auto_camera(self) -> None:
@@ -47,11 +46,39 @@ class TacticalCameraTests(unittest.TestCase):
 
     def test_battle_over_returns_to_overview(self) -> None:
         camera = TacticalCamera(enabled=True)
-        self.sim.force_result("Allied")
+        self.sim.force_result('Allied')
         camera.update(self.sim, set(), 0.3)
-        self.assertEqual(camera.focus_label, "After-action overview")
+        self.assertEqual(camera.focus_label, 'After-action overview')
         self.assertEqual(camera.target_zoom, 1.0)
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
+
+class TacticalMapLogTests(unittest.TestCase):
+
+    def test_log_filters_combat_and_caps_at_five(self) -> None:
+        from gateway_to_caen.camera import TacticalMapLog
+        log = TacticalMapLog(max_messages=99)
+        log.add(0, 'Combat', 'This should not appear')
+        for index in range(8):
+            log.add(index, 'Orders', f'Message {index}')
+        self.assertEqual(len(log.entries), 5)
+        self.assertEqual(log.entries[0].text, 'Message 3')
+        self.assertNotIn('This should not appear', [entry.text for entry in log.entries])
+
+    def test_auto_camera_can_open_friendly_details(self) -> None:
+        import time
+        from gateway_to_caen.camera import AutoCameraMixin
+
+        class Harness(AutoCameraMixin):
+            pass
+        harness = Harness()
+        harness._camera_init(True)
+        harness.sim = BattleSimulation(TacticalBrain(seed=41), seed=4101, player_side='Allied')
+        harness.selected = set()
+        unit = harness.sim.living_units('Allied')[0]
+        harness.camera.focus_unit_ids = (unit.uid,)
+        harness._auto_detail_next_real = time.perf_counter() - 1
+        harness._update_auto_detail_selection()
+        self.assertEqual(harness.selected, {unit.uid})
+        self.assertEqual(harness._auto_detail_uid, unit.uid)
+        self.assertTrue(any(('Opened' in entry.text for entry in harness.tactical_log.entries)))
