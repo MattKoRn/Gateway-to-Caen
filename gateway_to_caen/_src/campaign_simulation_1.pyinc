@@ -1,0 +1,160 @@
+"""Campaign-aware simulation with persistent forces, smart enemy AI, and richer maps."""
+from __future__ import annotations
+
+import math
+import random
+from pathlib import Path
+from typing import Any, Iterable
+
+from .campaign import CampaignState, SIDES, load_campaign, save_campaign
+from .enemy_ai import SmartEnemyAI
+from .persistence import user_data_dir
+from .simulation import (
+    MAP_HEIGHT,
+    MAP_WIDTH,
+    TERRAIN_COVER,
+    WEAPON_PROFILES,
+    BattleSimulation,
+    ControlPoint,
+    Obstacle,
+    Unit,
+    clamp,
+    distance,
+    opposite_side,
+)
+from .spatial import SpatialHash
+
+MAP_THEMES = (
+    "Bocage Labyrinth",
+    "Village Crossroads",
+    "Wooded Ridge",
+    "Muddy Causeway",
+    "Open Farmland",
+    "Twin-Road Salient",
+)
+OBJECTIVE_TEMPLATES = (
+    ("capture", "Seize {point}", "Capture and hold {point} before the battle ends."),
+    ("hold", "Hold {point}", "Retain control of {point} against enemy counterattacks."),
+    ("recon", "Reconnoitre {point}", "Bring a scout formation within observation range of {point}."),
+    ("breakthrough", "Break through near {point}", "Push a living formation beyond the central line near {point}."),
+    ("preserve", "Preserve the armoured reserve", "Finish the battle with at least one armoured formation alive."),
+    ("destroy_armour", "Neutralise enemy armour", "Eliminate at least one hostile armoured formation."),
+)
+
+
+class CampaignBattleSimulation(BattleSimulation):
+    """Battle simulation whose living formations and resources persist."""
+
+    SAVE_VERSION = 6
+
+    def __init__(self, brain, seed: int | None = None, player_side: str = "Allied", campaign_path: Path | None = None) -> None:
+        self.campaign_path = campaign_path or (user_data_dir() / "campaign_state.json")
+        self.campaign = load_campaign(self.campaign_path)
+        self.campaign.attach_brain(brain)
+        self.map_theme = MAP_THEMES[0]
+        self.rolled_objectives: list[dict[str, Any]] = []
+        self.requisition_report: list[Any] = []
+        self.enemy_ai = SmartEnemyAI(seed or 0)
+        self.enemy_ai_interval = 2.0
+        self.enemy_ai_accumulator = 0.0
+        self._map_rng = random.Random(seed)
+        self._campaign_initializing = True
+        self._settled_battle_seed: int | None = None
+        self._obstacle_index = SpatialHash[Obstacle](2.2)
+        self._unit_index = SpatialHash[Unit](2.5)
+        self._indexed_obstacle_count = 0
+        self._map_serial = 0
+        self.TERRAIN_COVER = TERRAIN_COVER
+        super().__init__(brain, seed=seed, player_side=player_side)
+        self._campaign_initializing = False
+
+    @property
+    def difficulty(self) -> float:
+        return self.campaign.difficulty
+
+    @property
+    def reward_multiplier(self) -> float:
+        return self.campaign.reward_multiplier
+
+    def save_campaign(self) -> None:
+        self.campaign.attach_brain(self.brain)
+        save_campaign(self.campaign_path, self.campaign)
+
+    def sync_live_rosters(self) -> None:
+        if getattr(self, "units", None):
+            self.campaign.capture_survivors(self.units)
+
+    def new_battle(self, seed: int | None = None) -> None:
+        if getattr(self, "units", None) and not self._campaign_initializing:
+            self.sync_live_rosters()
+        if seed is None:
+            seed = self.rng.randrange(1, 2**31 - 1) if hasattr(self, "rng") else random.randrange(1, 2**31 - 1)
+        self._prepare_map_roll(int(seed))
+        self.campaign.battle_index += 1
+        self.campaign.attach_brain(self.brain)
+        self.requisition_report = self.campaign.requisition_for_battle(self.brain, int(seed), max_per_side=3)
+        super().new_battle(seed=int(seed))
+        self.operation_name = self._operation_name()
+        self.enemy_ai.reset(self.seed)
+        self.enemy_ai_accumulator = 0.0
+        self._settled_battle_seed = None
+        self._apply_adaptive_force_quality()
+        self._rebuild_spatial_indexes()
+        self.campaign.last_objectives = [dict(item) for item in self.rolled_objectives]
+        self.campaign.map_history.append({"battle_index": self.campaign.battle_index, "seed": self.seed, "theme": self.map_theme, "operation": self.operation_name, "objectives": [item["title"] for item in self.rolled_objectives]})
+        self.log("Campaign", f"{self.map_theme} generated with {len(self.rolled_objectives)} unique objectives.")
+        if self.requisition_report:
+            for record in self.requisition_report:
+                self.log("Requisition", f"{record.side} acquired {record.unit_name} ({record.unit_type}).")
+        self.save_campaign()
+
+    def _prepare_map_roll(self, seed: int) -> None:
+        self._map_rng = random.Random(seed ^ 0xC0A6)
+        recent_themes = [entry.get("theme") for entry in self.campaign.map_history[-2:] if isinstance(entry, dict)]
+        choices = [theme for theme in MAP_THEMES if theme not in recent_themes] or list(MAP_THEMES)
+        self.map_theme = self._map_rng.choice(choices)
+        self._map_serial += 1
+        self.rolled_objectives = []
+
+    def _operation_name(self) -> str:
+        first = self._map_rng.choice(("Copper", "Resolute", "Night", "Iron", "Lantern", "Thunder", "Quiet", "Fox"))
+        second = self._map_rng.choice(("Orchard", "Causeway", "Hammer", "Meadow", "Crossing", "Ridge", "Anvil", "Gate"))
+        return f"Operation {first} {second} #{self.campaign.battle_index:02d}"
+
+    def _generate_terrain(self) -> list[list[str]]:
+        rng = self._map_rng
+        grid = [["open" for _ in range(MAP_WIDTH)] for _ in range(MAP_HEIGHT)]
+
+        def paint_circle(cx: float, cy: float, radius: float, terrain: str, roughness: float = 0.65) -> None:
+            for y in range(max(0, int(cy - radius - 1)), min(MAP_HEIGHT, int(cy + radius + 2))):
+                for x in range(max(0, int(cx - radius - 1)), min(MAP_WIDTH, int(cx + radius + 2))):
+                    if distance((x, y), (cx, cy)) <= radius + rng.uniform(-roughness, roughness):
+                        if grid[y][x] != "road" or terrain == "village":
+                            grid[y][x] = terrain
+
+        def road_curve(base_y: float, amplitude: float, phase: float = 0.0) -> None:
+            for x in range(MAP_WIDTH):
+                y = int(clamp(round(base_y + math.sin(x / 4.0 + phase) * amplitude), 1, MAP_HEIGHT - 2))
+                grid[y][x] = "road"
+                if rng.random() < 0.24 and y + 1 < MAP_HEIGHT:
+                    grid[y + 1][x] = "road"
+
+        if self.map_theme == "Bocage Labyrinth":
+            road_curve(MAP_HEIGHT / 2, 1.3)
+            for y in (3, 6, 10, 13):
+                gate = rng.randrange(5, MAP_WIDTH - 5)
+                for x in range(3, MAP_WIDTH - 3):
+                    if abs(x - gate) > 1 and grid[y][x] != "road": grid[y][x] = "hedge"
+            for x in (7, 13, 19):
+                gate = rng.randrange(3, MAP_HEIGHT - 3)
+                for y in range(2, MAP_HEIGHT - 2):
+                    if abs(y - gate) > 1 and grid[y][x] == "open": grid[y][x] = "hedge"
+            for _ in range(6): paint_circle(rng.randrange(5, MAP_WIDTH - 5), rng.randrange(2, MAP_HEIGHT - 2), rng.uniform(1.2, 2.3), rng.choice(("woods", "village")))
+        elif self.map_theme == "Village Crossroads":
+            road_curve(MAP_HEIGHT / 2, 0.7)
+            road_x = MAP_WIDTH // 2 + rng.choice((-2, -1, 0, 1, 2))
+            for y in range(MAP_HEIGHT):
+                grid[y][road_x] = "road"
+                if rng.random() < 0.32 and road_x + 1 < MAP_WIDTH: grid[y][road_x + 1] = "road"
+            paint_circle(road_x, MAP_HEIGHT / 2, 3.1, "village", 0.4)
+            for _ in range(8): paint_circle(rng.randrange(3, MAP_WIDTH - 3), rng.randrange(1, MAP_HEIGHT - 1), rng.uniform(1.0, 2.0), rng.choice(("woods", "hedge", "mud")))
