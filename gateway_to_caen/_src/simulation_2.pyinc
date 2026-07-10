@@ -1,0 +1,327 @@
+        return min(source, key=lambda point: distance((unit.x, unit.y), (point.x, point.y)), default=None)
+
+    def vision_radius(self, unit: Unit) -> float:
+        radius = VISION_RADIUS.get(unit.unit_type, 5.5)
+        if unit.order == 'Hold':
+            radius += 0.35
+        if self.tile_at(unit.x, unit.y) == 'village':
+            radius += 0.45
+        elif self.tile_at(unit.x, unit.y) == 'woods':
+            radius -= 0.65
+        if self.weather in ('Light rain', 'Low cloud'):
+            radius *= 0.88
+        return max(2.5, radius)
+
+    def _recalculate_visibility(self, force: bool=False) -> None:
+        if not force and self.visibility_accumulator < 0.18:
+            return
+        self.visibility_accumulator = 0.0
+        visible: dict[str, set[tuple[int, int]]] = {'Allied': set(), 'Axis': set()}
+        for side in ('Allied', 'Axis'):
+            for unit in self.living_units(side):
+                radius = self.vision_radius(unit)
+                min_x = max(0, int(math.floor(unit.x - radius)))
+                max_x = min(MAP_WIDTH - 1, int(math.ceil(unit.x + radius)))
+                min_y = max(0, int(math.floor(unit.y - radius)))
+                max_y = min(MAP_HEIGHT - 1, int(math.ceil(unit.y + radius)))
+                for y in range(min_y, max_y + 1):
+                    for x in range(min_x, max_x + 1):
+                        if distance((unit.x, unit.y), (x + 0.5, y + 0.5)) <= radius:
+                            visible[side].add((x, y))
+            self.explored_tiles.setdefault(side, set()).update(visible[side])
+        self._visible_cache = visible
+
+    def current_visible_tiles(self, side: str) -> set[tuple[int, int]]:
+        if side not in self._visible_cache or not self._visible_cache[side]:
+            self._recalculate_visibility(force=True)
+        return set(self._visible_cache.get(side, set()))
+
+    def is_position_visible(self, x: float, y: float, viewer_side: str) -> bool:
+        tile = (int(clamp(math.floor(x), 0, MAP_WIDTH - 1)), int(clamp(math.floor(y), 0, MAP_HEIGHT - 1)))
+        return tile in self.current_visible_tiles(viewer_side)
+
+    def is_unit_visible(self, unit: Unit, viewer_side: str) -> bool:
+        return unit.side == viewer_side or self.is_position_visible(unit.x, unit.y, viewer_side)
+
+    def visible_enemy_units(self, viewer_side: str) -> list[Unit]:
+        enemy = opposite_side(viewer_side)
+        return [unit for unit in self.living_units(enemy) if self.is_unit_visible(unit, viewer_side)]
+
+    def line_of_sight(self, attacker: Unit, target: Unit) -> bool:
+        if attacker.unit_type == 'Mortar':
+            return True
+        dist = distance((attacker.x, attacker.y), (target.x, target.y))
+        if dist <= 2.2:
+            return True
+        samples = max(2, int(dist * 2.0))
+        obstruction = 0.0
+        for index in range(1, samples):
+            ratio = index / samples
+            x = attacker.x + (target.x - attacker.x) * ratio
+            y = attacker.y + (target.y - attacker.y) * ratio
+            terrain = self.tile_at(x, y)
+            obstruction += {'woods': 0.075, 'village': 0.095, 'hedge': 0.055}.get(terrain, 0.0)
+        for obstacle in self.obstacles:
+            if not obstacle.blocks_los:
+                continue
+            if self._segment_near_obstacle(attacker.x, attacker.y, target.x, target.y, obstacle):
+                obstruction += 0.62 if obstacle.kind in ('bunker', 'tree_cluster', 'burning_wreck') else 0.34
+        return obstruction < 0.52
+
+    @classmethod
+    def _segment_near_obstacle(cls, x1: float, y1: float, x2: float, y2: float, obstacle: Obstacle) -> bool:
+        samples = max(4, int(math.hypot(x2 - x1, y2 - y1) * 3.0))
+        for index in range(1, samples):
+            ratio = index / samples
+            x = x1 + (x2 - x1) * ratio
+            y = y1 + (y2 - y1) * ratio
+            if cls.obstacle_distance(x, y, obstacle) <= obstacle.radius + 0.08:
+                return True
+        return False
+
+    def state_vector(self, unit: Unit) -> list[float]:
+        enemy = self.nearest_enemy(unit)
+        objective = self.nearest_objective(unit)
+        enemy_distance = distance((unit.x, unit.y), (enemy.x, enemy.y)) if enemy else MAP_WIDTH
+        objective_distance = distance((unit.x, unit.y), (objective.x, objective.y)) if objective else MAP_WIDTH
+        local_friends = sum((1 for other in self.living_units(unit.side) if other.uid != unit.uid and distance((unit.x, unit.y), (other.x, other.y)) <= 4.5))
+        local_enemies = sum((1 for other in self.living_units(opposite_side(unit.side)) if distance((unit.x, unit.y), (other.x, other.y)) <= 6.0))
+        terrain_cover = TERRAIN_COVER[self.tile_at(unit.x, unit.y)]
+        map_direction = (MAP_WIDTH - unit.x) / MAP_WIDTH if unit.side == 'Allied' else unit.x / MAP_WIDTH
+        return [unit.strength * 2 - 1, unit.morale / 50 - 1, unit.ammo / 50 - 1, unit.suppression / 50 - 1, clamp(enemy_distance / 10 - 1, -1, 1), clamp(objective_distance / 10 - 1, -1, 1), clamp(local_friends / 3 - 1, -1, 1), clamp(local_enemies / 3 - 1, -1, 1), terrain_cover * 2 - 1, map_direction * 2 - 1]
+
+    def issue_order(self, unit_ids: Iterable[str], order: str, x: float | None=None, y: float | None=None) -> None:
+        for uid in unit_ids:
+            unit = self.unit_by_id(uid)
+            if not unit or not unit.alive or unit.side != self.player_side:
+                continue
+            unit.order = order
+            unit.stance = order
+            if x is not None and y is not None:
+                requested_x = clamp(x, 0, MAP_WIDTH - 1)
+                requested_y = clamp(y, 0, MAP_HEIGHT - 1)
+                unit.target_x, unit.target_y = self.nearest_clear_position(requested_x, requested_y, self.unit_collision_radius(unit))
+                if distance((requested_x, requested_y), (unit.target_x, unit.target_y)) > 0.08:
+                    self.log('Movement', f'{unit.name}: route endpoint shifted clear of an obstacle.')
+            elif order == 'Hold':
+                unit.target_x, unit.target_y = (unit.x, unit.y)
+            elif order == 'Retreat':
+                unit.target_x = 1.0 if unit.side == 'Allied' else MAP_WIDTH - 2.0
+                unit.target_y = unit.y
+            self.log('Orders', f'{unit.name}: {order}.')
+
+    def tick(self, dt: float) -> None:
+        dt = clamp(dt, 0.005, 0.25)
+        self._update_effects(dt)
+        if self.battle_over:
+            return
+        self.elapsed += dt
+        self.ai_accumulator += dt
+        self.visibility_accumulator += dt
+        while self.ai_accumulator >= 2.0:
+            self.ai_accumulator -= 2.0
+            self._ai_decision_cycle()
+        self._move_units(dt)
+        self._resolve_combat(dt)
+        self._recover_units(dt)
+        self._update_control_points(dt)
+        self._recalculate_visibility()
+        self._check_victory()
+
+    def _ai_decision_cycle(self) -> None:
+        for unit in self.living_units():
+            should_control = unit.ai_controlled or (unit.side == self.player_side and self.player_ai_enabled)
+            if not should_control:
+                continue
+            current_state = self.state_vector(unit)
+            previous = self.experiences.get(unit.uid)
+            if previous:
+                reward = self._reward_for(unit, previous)
+                self.last_training_error = self.brain.train(previous.state, previous.action, reward, current_state)
+            action = self.brain.choose_action(current_state, explore=True)
+            self._apply_ai_action(unit, ACTIONS[action])
+            enemy_men = sum((enemy.men for enemy in self.living_units(opposite_side(unit.side))))
+            objective = self.nearest_objective(unit)
+            objective_distance = distance((unit.x, unit.y), (objective.x, objective.y)) if objective else 0.0
+            self.experiences[unit.uid] = Experience(current_state, action, unit.men, enemy_men, objective_distance)
+
+    def _reward_for(self, unit: Unit, previous: Experience) -> float:
+        enemy_men = sum((enemy.men for enemy in self.living_units(opposite_side(unit.side))))
+        objective = self.nearest_objective(unit)
+        objective_distance = distance((unit.x, unit.y), (objective.x, objective.y)) if objective else 0.0
+        casualty_reward = (previous.enemy_men - enemy_men) * 0.45
+        casualty_penalty = (previous.own_men - unit.men) * 0.65
+        objective_reward = (previous.objective_distance - objective_distance) * 0.05
+        cover_reward = 0.025 if self.tile_at(unit.x, unit.y) in ('woods', 'hedge', 'village') else 0.0
+        retreat_reward = 0.12 if unit.morale < 25 and ACTIONS[previous.action] == 'retreat' else 0.0
+        return clamp(casualty_reward - casualty_penalty + objective_reward + cover_reward + retreat_reward, -2.0, 2.0)
+
+    def _apply_ai_action(self, unit: Unit, action: str) -> None:
+        enemy = self.nearest_enemy(unit)
+        objective = self.nearest_objective(unit)
+        if action == 'hold':
+            unit.order, unit.stance = ('Hold', 'Defend')
+            unit.target_x, unit.target_y = (unit.x, unit.y)
+        elif action == 'retreat':
+            unit.order, unit.stance = ('Retreat', 'Evade')
+            unit.target_x = 1.0 if unit.side == 'Allied' else MAP_WIDTH - 2.0
+            unit.target_y = clamp(unit.y + self.rng.uniform(-2.0, 2.0), 0, MAP_HEIGHT - 1)
+        elif action == 'assault' and enemy:
+            unit.order, unit.stance = ('Assault', 'Aggressive')
+            unit.target_x, unit.target_y = (enemy.x, enemy.y)
+        elif action == 'flank' and enemy:
+            unit.order, unit.stance = ('Flank', 'Cautious')
+            direction = 1 if self.rng.random() < 0.5 else -1
+            unit.target_x = clamp(enemy.x, 0, MAP_WIDTH - 1)
+            unit.target_y = clamp(enemy.y + direction * 3.5, 0, MAP_HEIGHT - 1)
+        else:
+            unit.order, unit.stance = ('Advance', 'Advance')
+            if objective:
+                unit.target_x = clamp(objective.x + self.rng.uniform(-1.0, 1.0), 0, MAP_WIDTH - 1)
+                unit.target_y = clamp(objective.y + self.rng.uniform(-1.0, 1.0), 0, MAP_HEIGHT - 1)
+        if unit.target_x is not None and unit.target_y is not None:
+            unit.target_x, unit.target_y = self.nearest_clear_position(unit.target_x, unit.target_y, self.unit_collision_radius(unit))
+
+    def _move_units(self, dt: float) -> None:
+        for unit in self.living_units():
+            desired_vx = 0.0
+            desired_vy = 0.0
+            if unit.target_x is not None and unit.target_y is not None and (unit.order != 'Hold'):
+                dx = unit.target_x - unit.x
+                dy = unit.target_y - unit.y
+                dist = math.hypot(dx, dy)
+                if dist < 0.1:
+                    if unit.order not in ('Assault', 'Flank'):
+                        unit.order = 'Hold'
+                    unit.target_x, unit.target_y = (unit.x, unit.y)
+                else:
+                    terrain = self.tile_at(unit.x, unit.y)
+                    base_speed = 1.02 if unit.unit_type == 'Armour' else 0.82
+                    if unit.unit_type == 'Scout':
+                        base_speed *= 1.12
+                    if unit.order == 'Retreat':
+                        base_speed *= 1.18
+                    if unit.suppression > 65:
+                        base_speed *= 0.48
+                    elif unit.suppression > 35:
+                        base_speed *= 0.72
+                    desired_speed = base_speed * TERRAIN_SPEED[terrain]
+                    desired_vx = dx / dist * desired_speed
+                    desired_vy = dy / dist * desired_speed
+                    desired_vx, desired_vy = self._steer_around_obstacles(unit, desired_vx, desired_vy)
+            acceleration = 5.4 if unit.unit_type != 'Armour' else 3.8
+            blend = 1.0 - math.exp(-acceleration * dt)
+            unit.velocity_x += (desired_vx - unit.velocity_x) * blend
+            unit.velocity_y += (desired_vy - unit.velocity_y) * blend
+            if abs(unit.velocity_x) < 0.002:
+                unit.velocity_x = 0.0
+            if abs(unit.velocity_y) < 0.002:
+                unit.velocity_y = 0.0
+            if unit.speed > 0.02:
+                unit.heading = math.atan2(unit.velocity_y, unit.velocity_x)
+            next_x = clamp(unit.x + unit.velocity_x * dt, 0, MAP_WIDTH - 1)
+            next_y = clamp(unit.y + unit.velocity_y * dt, 0, MAP_HEIGHT - 1)
+            unit.x, unit.y = self._resolve_obstacle_collisions(unit, next_x, next_y)
+        self._separate_units(dt)
+
+    def _steer_around_obstacles(self, unit: Unit, desired_vx: float, desired_vy: float) -> tuple[float, float]:
+        speed = math.hypot(desired_vx, desired_vy)
+        if speed <= 1e-06:
+            return (desired_vx, desired_vy)
+        radius = self.unit_collision_radius(unit)
+        steer_x, steer_y = (desired_vx, desired_vy)
+        look_x = unit.x + desired_vx / speed * 0.72
+        look_y = unit.y + desired_vy / speed * 0.72
+        for obstacle in self.obstacles:
+            if not obstacle.blocks_movement:
+                continue
+            closest_x, closest_y = self._closest_point_on_obstacle(look_x, look_y, obstacle)
+            dx, dy = (look_x - closest_x, look_y - closest_y)
+            dist = math.hypot(dx, dy)
+            influence = obstacle.radius + radius + 0.72
+            if dist >= influence:
+                continue
+            if dist <= 1e-05:
+                nx, ny = (-math.sin(obstacle.angle), math.cos(obstacle.angle))
+            else:
+                nx, ny = (dx / dist, dy / dist)
+            tangent_a = (-ny, nx)
+            tangent_b = (ny, -nx)
+            desired_dir = (desired_vx / speed, desired_vy / speed)
+            tangent = tangent_a if tangent_a[0] * desired_dir[0] + tangent_a[1] * desired_dir[1] >= tangent_b[0] * desired_dir[0] + tangent_b[1] * desired_dir[1] else tangent_b
+            strength = clamp((influence - dist) / influence, 0.0, 1.0)
+            steer_x += (nx * 0.95 + tangent[0] * 0.75) * speed * strength
+            steer_y += (ny * 0.95 + tangent[1] * 0.75) * speed * strength
+        magnitude = math.hypot(steer_x, steer_y)
+        if magnitude <= 1e-06:
+            return (0.0, 0.0)
+        return (steer_x / magnitude * speed, steer_y / magnitude * speed)
+
+    def _resolve_obstacle_collisions(self, unit: Unit, x: float, y: float) -> tuple[float, float]:
+        radius = self.unit_collision_radius(unit)
+        for _ in range(3):
+            collided = False
+            for obstacle in self.obstacles:
+                if not obstacle.blocks_movement:
+                    continue
+                closest_x, closest_y = self._closest_point_on_obstacle(x, y, obstacle)
+                dx, dy = (x - closest_x, y - closest_y)
+                dist = math.hypot(dx, dy)
+                minimum = obstacle.radius + radius
+                if dist >= minimum:
+                    continue
+                collided = True
+                if dist <= 1e-06:
+                    nx, ny = (-math.sin(obstacle.angle), math.cos(obstacle.angle))
+                else:
+                    nx, ny = (dx / dist, dy / dist)
+                push = minimum - dist + 0.003
+                x = clamp(x + nx * push, radius, MAP_WIDTH - 1 - radius)
+                y = clamp(y + ny * push, radius, MAP_HEIGHT - 1 - radius)
+                inward = unit.velocity_x * nx + unit.velocity_y * ny
+                if inward < 0.0:
+                    unit.velocity_x -= inward * nx
+                    unit.velocity_y -= inward * ny
+            if not collided:
+                break
+        return (x, y)
+
+    def _separate_units(self, dt: float) -> None:
+        living = self.living_units()
+        for index, first in enumerate(living):
+            for second in living[index + 1:]:
+                dx, dy = (first.x - second.x, first.y - second.y)
+                dist = math.hypot(dx, dy)
+                minimum = self.unit_collision_radius(first) + self.unit_collision_radius(second)
+                if dist >= minimum:
+                    continue
+                if dist <= 0.001:
+                    angle = ((hash(first.uid) ^ hash(second.uid)) & 255) / 255 * math.tau
+                    nx, ny = (math.cos(angle), math.sin(angle))
+                    dist = 0.001
+                else:
+                    nx, ny = (dx / dist, dy / dist)
+                push = (minimum - dist) * 0.52 * min(1.0, dt * 12.0)
+                first.x, first.y = self._resolve_obstacle_collisions(first, clamp(first.x + nx * push, 0, MAP_WIDTH - 1), clamp(first.y + ny * push, 0, MAP_HEIGHT - 1))
+                second.x, second.y = self._resolve_obstacle_collisions(second, clamp(second.x - nx * push, 0, MAP_WIDTH - 1), clamp(second.y - ny * push, 0, MAP_HEIGHT - 1))
+
+    def _select_target(self, attacker: Unit, profile: dict[str, float]) -> Unit | None:
+        candidates: list[tuple[float, Unit]] = []
+        for target in self.living_units(opposite_side(attacker.side)):
+            dist = distance((attacker.x, attacker.y), (target.x, target.y))
+            if dist < profile['min_range'] or dist > profile['range']:
+                continue
+            if attacker.unit_type != 'Mortar' and (not self.line_of_sight(attacker, target)):
+                continue
+            priority = dist - (0.7 if target.unit_type == 'Armour' and attacker.unit_type in ('Armour', 'Mortar') else 0.0)
+            candidates.append((priority, target))
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+    def _resolve_combat(self, dt: float) -> None:
+        attackers = list(self.living_units())
+        self.rng.shuffle(attackers)
+        for attacker in attackers:
+            attacker.fire_cooldown = max(0.0, attacker.fire_cooldown - dt)
+            if attacker.fire_cooldown > 0.0 or attacker.ammo <= 0.0 or attacker.suppression >= 92.0:
+                continue
+            profile = WEAPON_PROFILES.get(attacker.unit_type, WEAPON_PROFILES['Rifle'])
