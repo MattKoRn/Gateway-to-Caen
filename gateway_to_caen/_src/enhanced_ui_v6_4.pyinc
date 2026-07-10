@@ -1,0 +1,162 @@
+        self.campaign_info.configure(text=f"OFFLINE RESERVES\n{'=' * 42}\nCommand Points:       {self.profile.command_points:,}\nSupplies:             {self.profile.supplies:,}\nReinforcement Tokens: {self.profile.reinforcement_tokens:,}\nIntelligence Reports: {self.profile.intelligence_reports:,}\n\nLifetime offline:     {format_duration(self.profile.lifetime_offline_seconds)}\nSessions started:     {self.profile.sessions:,}\nPending report:       {pending}\n\nThese offline rewards are retained separately from both faction campaign resource pools.")
+
+    def _show_offline_report(self) -> None:
+        report = self.offline_report
+        if report is None and self.profile.pending_report:
+            report = OfflineRewards.from_dict(self.profile.pending_report)
+        if report is None or report.offline_seconds <= 0:
+            messagebox.showinfo("Offline Progress", "There is no pending offline progress report.", parent=self.root)
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Offline Progress — Command Report")
+        window.configure(bg=W95["face"])
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.grab_set()
+        tk.Label(window, text="▣  OFFLINE COMMAND REPORT", bg=W95["navy"], fg="white", font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x", padx=3, pady=3)
+        body = tk.Frame(window, bg="#f7faf8", bd=2, relief="sunken")
+        body.pack(fill="both", expand=True, padx=10, pady=8)
+        tk.Label(body, text="WELCOME BACK, COMMANDER", bg="#f7faf8", fg=W95["navy"], font=("Segoe UI", 13, "bold")).pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(body, text=f"You were offline for\n{format_duration(report.offline_seconds)}", bg="#f7faf8", font=("Segoe UI", 10, "bold"), justify="center").pack(fill="x", padx=8, pady=(6, 10))
+        for index, (name, amount, code) in enumerate((("Command Points", report.command_points, "CP"), ("Supplies", report.supplies, "SUP"), ("Reinforcement Tokens", report.reinforcement_tokens, "RT"), ("Intelligence Reports", report.intelligence_reports, "INT"))):
+            shade = "#e9f0f7" if index % 2 == 0 else "#f7faf8"
+            row = tk.Frame(body, bg=shade, bd=1, relief="groove")
+            row.pack(fill="x", padx=8, pady=2)
+            tk.Label(row, text=code, width=5, bg=W95["navy"], fg="white", font=("Consolas", 9, "bold")).pack(side="left", padx=4, pady=4)
+            tk.Label(row, text=name, bg=shade, anchor="w", font=("Segoe UI", 9, "bold")).pack(side="left", fill="x", expand=True, padx=8)
+            tk.Label(row, text=f"+{amount:,}", bg=shade, fg="#14651e", font=("Consolas", 11, "bold")).pack(side="right", padx=10)
+        def dismiss() -> None:
+            dismiss_pending_report(self.profile_path, self.profile)
+            self.offline_report = None
+            window.destroy()
+        ttk.Button(window, text="Dismiss Report", command=dismiss, width=18).pack(anchor="e", padx=10, pady=(0, 10))
+        window.protocol("WM_DELETE_WINDOW", dismiss)
+        window.update_idletasks()
+        window.geometry(f"+{self.root.winfo_rootx() + 120}+{self.root.winfo_rooty() + 90}")
+        self.root.wait_window(window)
+
+    def _update_auto_detail_selection(self) -> None:
+        return
+
+    def _world_event(self, x: float, y: float) -> SimpleNamespace:
+        w, h = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
+        cw, ch = self._camera_cell_sizes(w, h)
+        return SimpleNamespace(x=int(self._mx(x, w, cw)), y=int(self._my(y, h, ch)), state=0)
+
+    def _neural_left_click_world(self, x: float, y: float) -> None:
+        self._neural_injected = True
+        try:
+            BaseTacticalCommandApp._left(self, self._world_event(x, y))
+            self._record_tactical("Neural Mouse", "Left-clicked a friendly formation.")
+            self.sound_manager.play("select")
+        finally:
+            self._neural_injected = False
+
+    def _neural_order_button(self, order: str) -> None:
+        self._neural_injected = True
+        try:
+            BaseTacticalCommandApp.order(self, order)
+            self._record_tactical("Neural Mouse", f"Clicked the {order} command.")
+            self.sound_manager.play("ui_click")
+        finally:
+            self._neural_injected = False
+
+    def _neural_right_click_world(self, x: float, y: float) -> None:
+        self._neural_injected = True
+        try:
+            BaseTacticalCommandApp._right(self, self._world_event(x, y))
+            self._record_tactical("Neural Mouse", f"Right-clicked grid {int(x):02d},{int(y):02d}.")
+            self.sound_manager.play("order")
+        finally:
+            self._neural_injected = False
+
+    def _left(self, event: tk.Event) -> None:
+        super()._left(event)
+        if not self._neural_injected and hasattr(self, "neural_cursor"):
+            self.neural_cursor.notify_manual_activity()
+            self.sound_manager.play("select")
+
+    def _right(self, event: tk.Event) -> None:
+        super()._right(event)
+        if not self._neural_injected and hasattr(self, "neural_cursor"):
+            self.neural_cursor.notify_manual_activity()
+            self.sound_manager.play("order")
+
+    def order(self, name: str) -> None:
+        super().order(name)
+        if not self._neural_injected and hasattr(self, "neural_cursor"):
+            self.neural_cursor.notify_manual_activity()
+            self.sound_manager.play("ui_click")
+
+    def _toggle_ai(self) -> None:
+        enabled = bool(self.ai_var.get())
+        self.sim.player_ai_enabled = enabled
+        if hasattr(self, "neural_cursor"):
+            self.neural_cursor.set_enabled(enabled)
+        self.settings["neural_mouse"] = enabled
+        atomic_write_json(self.settings_path, self.settings)
+        self.canvas.configure(cursor="none" if enabled else "crosshair")
+        self.status.configure(text=f"Neural mouse commander {'enabled' if enabled else 'disabled'}; the simulation never directly auto-orders the player faction.")
+
+    def _toggle_sound(self) -> None:
+        enabled = bool(self.sound_var.get())
+        self.sound_manager.set_enabled(enabled)
+        self.settings["sound_enabled"] = enabled
+        atomic_write_json(self.settings_path, self.settings)
+        if enabled:
+            self.sound_manager.play("ui_click", force=True)
+
+    def _new_map_state(self, message: str) -> None:
+        self.terrain_signature = None
+        self.fog_signature = None
+        super()._new_map_state(message)
+        if hasattr(self, "neural_cursor"):
+            self.neural_cursor.reset_for_map(self.sim)
+        self.sound_manager.play("battle_start", force=True)
+        self._last_battle_over = False
+
+    def save(self, silent: bool = False) -> None:
+        super().save(silent=silent)
+        self.sim.save_campaign()
+        try:
+            touch_profile(self.profile_path, self.profile)
+        except OSError:
+            pass
+
+    def load(self) -> None:
+        super().load()
+        self.terrain_signature = None
+        self.fog_signature = None
+        if hasattr(self, "neural_cursor"):
+            self.neural_cursor.reset_for_map(self.sim)
+
+    def reset_brain(self) -> None:
+        if not messagebox.askyesno("Reset Neural Brain", "Erase learned cursor and requisition weights and lifetime statistics?", parent=self.root):
+            return
+        self.brain = TacticalBrain()
+        self.sim.brain = self.brain
+        self.sim.campaign.attach_brain(self.brain)
+        if hasattr(self, "neural_cursor"):
+            self.neural_cursor.brain = self.brain
+        self.brain.save(self.brain_path)
+        self.status.configure(text="Neural virtual-player brain reset.")
+
+    def controls(self) -> None:
+        messagebox.showinfo("Controls", "The neural mouse is enabled by default and performs visible selection and order actions.\n\nN: toggle neural mouse\nC: toggle auto camera\nF: focus selection\nMouse wheel: zoom\nMiddle-drag: pan\nLeft-click: manual selection\nRight-click: manual destination\n\nManual input pauses the neural mouse for eight seconds.", parent=self.root)
+
+    def about(self) -> None:
+        messagebox.showinfo("About", "Gateway to Caen: Tactical Command\nVersion 0.6.0\n\nOriginal clean-room tactical campaign featuring persistent armies, adaptive conventional enemy AI, a visible neural virtual player, packaged artwork, and generated sound effects.", parent=self.root)
+
+    def close(self) -> None:
+        try:
+            self.sim.sync_live_rosters()
+            self.sim.save_campaign()
+            touch_profile(self.profile_path, self.profile)
+        finally:
+            super().close()
+
+
+def run() -> None:
+    root = tk.Tk()
+    TacticalCommandApp(root)
+    root.mainloop()
